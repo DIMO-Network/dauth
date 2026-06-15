@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dauth.fullname" . }}
+  labels:
+    {{- include "dauth.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+  {{- range $key, $value := .Values.service.ports }}
+    - name: {{ $key }}
+{{ toYaml $value | indent 6 }}
+  {{- end }}
+  selector:
+    {{- include "dauth.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: auth

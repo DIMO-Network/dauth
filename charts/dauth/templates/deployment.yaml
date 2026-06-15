@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dauth.fullname" . }}
+  labels:
+    {{- include "dauth.labels" . | nindent 4 }}
+spec:
+  # Single replica by design: the nonce store is in-memory, so a challenge must
+  # be redeemed on the pod that issued it. Move to a shared store (e.g. Redis)
+  # before raising this.
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "dauth.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: auth
+  template:
+    metadata:
+      annotations:
+        checksum/env: {{ include (print $.Template.BasePath "/configenv.yaml") . | sha256sum }}
+      {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "dauth.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: auth
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "dauth.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+          - configMapRef:
+              name: {{ include "dauth.fullname" . }}-config
+          - secretRef:
+              name: {{ include "dauth.fullname" . }}-secret
+          ports:
+{{ toYaml .Values.ports | indent 12 }}
+          livenessProbe:
+{{ toYaml .Values.livenessProbe | indent 12 }}
+          readinessProbe:
+{{ toYaml .Values.readinessProbe | indent 12 }}
+          resources:
+{{- toYaml .Values.resources | nindent 12 }}

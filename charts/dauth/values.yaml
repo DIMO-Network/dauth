@@ -1,0 +1,115 @@
+replicaCount: 1
+
+image:
+  repository: dimozone/dauth
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Non-secret configuration. Secret values (SIGNING_KEY_1, RPC_URL) come from the
+# ExternalSecret. See the README for the full variable reference.
+env:
+  ENVIRONMENT: dev
+  LOG_LEVEL: info
+  AUTH_ADDRESS: "0.0.0.0:8080"
+  OPS_ADDRESS: "0.0.0.0:8081"
+  ISSUER: https://auth.dev.dimo.zone
+  JWT_AUDIENCE: dimo
+  SIWE_STATEMENT: "Sign in to DIMO."
+  CHAIN_ID: "80002"
+  CHALLENGE_TTL: 5m
+  TOKEN_TTL: 10m
+  ALLOWABLE_TIME_SKEW: 5m
+  RATE_LIMIT_RPS: "20"
+  RATE_LIMIT_BURST: "40"
+
+ports:
+  - name: http
+    containerPort: 8080
+    protocol: TCP
+  - name: ops
+    containerPort: 8081
+    protocol: TCP
+
+livenessProbe:
+  httpGet:
+    path: /ping
+    port: ops
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: ops
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+service:
+  type: ClusterIP
+  ports:
+    http:
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    ops:
+      port: 8081
+      targetPort: ops
+      protocol: TCP
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+  hosts:
+    - host: auth.dev.dimo.zone
+      paths:
+        - path: /
+          pathType: Prefix
+          port: 8080
+  tls:
+    - hosts:
+        - auth.dev.dimo.zone
+      secretName: dauth-tls
+
+serviceMonitor:
+  enabled: true
+  port: ops
+  path: /metrics
+  interval: 30s
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1

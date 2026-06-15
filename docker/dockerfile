@@ -1,0 +1,18 @@
+# Build context is the dauth module root:
+#   docker build -f docker/dockerfile .
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# No CGO: dauth has no native dependencies, so it builds a fully static binary
+# and ships on distroless/static.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /dauth ./cmd/dauth
+
+FROM gcr.io/distroless/static AS final
+LABEL maintainer="DIMO <hello@dimo.zone>"
+USER nonroot:nonroot
+COPY --from=build /dauth /
+# 8080 public sign-in + JWKS, 8081 ops (probes + metrics).
+EXPOSE 8080 8081
+ENTRYPOINT ["/dauth"]

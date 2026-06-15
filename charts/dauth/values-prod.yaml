@@ -1,0 +1,39 @@
+env:
+  ENVIRONMENT: prod
+  LOG_LEVEL: info
+  AUTH_ADDRESS: "0.0.0.0:8080"
+  OPS_ADDRESS: "0.0.0.0:8081"
+  ISSUER: https://auth.dimo.zone
+  JWT_AUDIENCE: dimo
+  SIWE_STATEMENT: "Sign in to DIMO."
+  CHAIN_ID: "137"
+  CHALLENGE_TTL: 5m
+  TOKEN_TTL: 10m
+  ALLOWABLE_TIME_SKEW: 5m
+  RATE_LIMIT_RPS: "50"
+  RATE_LIMIT_BURST: "100"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 250m
+    memory: 128Mi
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+  hosts:
+    - host: auth.dimo.zone
+      paths:
+        - path: /
+          pathType: Prefix
+          port: 8080
+  tls:
+    - hosts:
+        - auth.dimo.zone
+      secretName: dauth-tls

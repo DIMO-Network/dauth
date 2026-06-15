@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dauth
+description: DIMO authentication — Sign-In With Ethereum to short-lived JWTs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

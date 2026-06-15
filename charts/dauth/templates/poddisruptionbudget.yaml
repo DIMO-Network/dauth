@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: {{ include "dauth.fullname" . }}
+  labels:
+    {{- include "dauth.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+    {{- include "dauth.selectorLabels" . | nindent 6 }}
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
+{{- end }}
