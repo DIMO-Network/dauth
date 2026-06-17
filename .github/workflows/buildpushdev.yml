@@ -1,0 +1,61 @@
+name: buildpushdev
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: buildpushdev
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get short SHA
+        id: slug
+        run: echo "sha7=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push dauth
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: dimozone/dauth:${{ steps.slug.outputs.sha7 }}, dimozone/dauth:latest
+
+      - name: Build and push token-exchange-api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/dockerfile.token-exchange-api
+          push: true
+          platforms: linux/amd64
+          tags: dimozone/token-exchange-api:${{ steps.slug.outputs.sha7 }}, dimozone/token-exchange-api:latest
+
+      - name: Update dauth image tag
+        uses: fjogeleit/yaml-update-action@master
+        with:
+          valueFile: "charts/dauth/values.yaml"
+          propertyPath: "image.tag"
+          value: ${{ steps.slug.outputs.sha7 }}
+          branch: main
+          message: "Update dauth image to ${{ steps.slug.outputs.sha7 }}"
+
+      - name: Update token-exchange-api image tag
+        uses: fjogeleit/yaml-update-action@master
+        with:
+          valueFile: "charts/token-exchange-api/values.yaml"
+          propertyPath: "image.tag"
+          value: ${{ steps.slug.outputs.sha7 }}
+          branch: main
+          message: "Update token-exchange-api image to ${{ steps.slug.outputs.sha7 }}"
