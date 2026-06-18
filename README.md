@@ -1,16 +1,46 @@
 # dauth
 
-DIMO authentication service. Clients prove control of an Ethereum account by
-signing a [Sign-In With Ethereum](https://eips.ethereum.org/EIPS/eip-4361)
-(EIP-4361) challenge; in return they receive a short-lived RS256 JWT identifying
-their address. Any service can validate those tokens offline against the JWKS
-and OIDC discovery document dauth publishes — no shared secret, no callback to
-dauth.
+This repository houses DIMO's Web3 auth pipeline as two small, single-purpose
+services that together replace the heavily-forked Dex (DEX) previously used for
+Web3 login. They are two stages of one flow:
 
-It replaces the heavily-forked Dex previously used for Web3 login with a small,
-purpose-built service: SIWE challenge → signature verify → JWT, plus a standard
-validation surface. No OAuth2 authorization-code flow, refresh tokens, or
-connector framework.
+1. **dauth** proves *"I control this Ethereum address."* A client signs a
+   [Sign-In With Ethereum](https://eips.ethereum.org/EIPS/eip-4361) (EIP-4361)
+   challenge and receives a short-lived RS256 JWT carrying its address.
+2. **token-exchange-api** proves *"this address may access this asset with these
+   permissions."* It takes a dauth address-control token from a registered
+   developer license and, after checking on-chain/SACD access, mints a permission
+   token scoped to a DIMO asset.
+
+Both are stateless and offline-verifiable: each service publishes its own JWKS
+and OIDC discovery document, and any service validates tokens against those — no
+shared secret, no callback. There is no OAuth2 authorization-code flow, refresh
+tokens, or connector framework.
+
+## Services
+
+| Service | Binary | Issues | Default `iss` | Surface |
+|---------|--------|--------|---------------|---------|
+| [dauth](#dauth--address-control-tokens) | `cmd/dauth` | Address-control token (`ethereum_address`) | `https://auth.dimo.zone` | HTTP |
+| [token-exchange-api](#token-exchange-api) | `cmd/token-exchange-api` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://auth-roles-rights.dimo.zone` | HTTP + gRPC |
+
+Each service has its own RSA signing key, its own Helm chart (`charts/dauth`,
+`charts/token-exchange-api`), and its own image. They share Go packages —
+`internal/keyset` (signing), `internal/oidc` (JWKS + discovery), and
+`internal/httpmw` (middleware) — but keep separate claims, issuers, and config.
+The public packages `pkg/tokenclaims` and `pkg/grpc` are consumed by downstream
+repos.
+
+The two services are documented in full below: dauth first, then
+token-exchange-api, followed by shared deployment and development notes.
+
+---
+
+# dauth — address-control tokens
+
+SIWE challenge → signature verify → JWT, plus a standard validation surface. The
+canonical SIWE message is generated and stored server-side; the issued JWT is
+stateless.
 
 ## Sign-in flow
 
@@ -158,19 +188,130 @@ as the RFC 7638 JWK thumbprint of the public key.
 3. After `TOKEN_TTL` elapses (no tokens from the old key remain valid), drop the
    old key and deploy.
 
-## Deployment
+The same `SIGNING_KEY_*` convention and rotation procedure apply to
+token-exchange-api, which carries its own independent key.
 
-- Container: `docker build -f docker/dockerfile .` — a static binary on
-  `distroless/static`.
-- Helm: `charts/dauth/`, with `values.yaml` (dev) and `values-prod.yaml`.
-  Signing keys and `RPC_URL` are pulled via an `ExternalSecret`.
-- **Run a single replica.** The nonce store is in-memory, so a challenge must be
-  redeemed on the pod that issued it. To scale out, back the `nonce.Store` with a
-  shared store (e.g. Redis) first.
+---
 
-## Development
+# token-exchange-api
+
+Exchanges a dauth address-control token for a permission token scoped to a DIMO
+asset, after validating on-chain/SACD access. It serves both an HTTP API and a
+gRPC `TokenExchangeService`, and publishes its own JWKS/discovery (taking over
+the endpoints DEX used to serve for the roles-rights issuer).
+
+## Exchange flow
+
+```
+caller                                  token-exchange-api
+  │ POST /v1/tokens/exchange               │
+  │   Authorization: Bearer <dauth token>  │  verify dauth token signature (JWKS),
+  │   { asset, permissions, cloudEvents }  │  require registered dev license,
+  │ ──────────────────────────────────────▶  read ethereum_address from the token,
+  │                                        │  check SACD/on-chain access for the asset,
+  │ ◀──────────────────────────────────────  mint permission token
+  │   { token }                            │
+```
+
+The inbound token must be a valid dauth token (`JWT_KEY_SET_URL` points at
+dauth's `/keys`), signature-checked, whose `ethereum_address` belongs to an
+address registered as a developer license in identity-api. Authorization (the
+SACD/on-chain grantee check) reads that same `ethereum_address` claim.
+
+## API
+
+### `POST /v1/tokens/exchange`
+
+Requires `Authorization: Bearer <dauth token>`. Request:
+
+```json
+{
+  "asset": "did:erc721:137:0xbA5738…:7",
+  "permissions": ["…"],
+  "cloudEvents": { "events": [ … ] },
+  "audience": ["dimo.zone"]
+}
+```
+
+`audience` is optional (defaults to `["dimo.zone"]`). The legacy `tokenId`,
+`privileges`, and `nftContractAddress` fields are still accepted but
+**deprecated** in favor of `asset` and `permissions`. Response:
+
+```json
+{ "token": "eyJ…" }
+```
+
+The minted token's claims include `asset`, `permissions`, and `cloud_events`
+alongside the standard `iss` / `sub` / `aud` / `exp` / `nbf` / `iat` / `jti`.
+
+### Other HTTP endpoints
+
+- `GET /` — health check (`{"data":"Server is up and running"}`).
+- `GET /v1/swagger/` — interactive OpenAPI docs.
+- `GET /keys` (alias `GET /.well-known/jwks.json`) — JWKS for the permission-token
+  signing key.
+- `GET /.well-known/openid-configuration` — OIDC discovery metadata.
+
+### gRPC
+
+`TokenExchangeService` is served on `GRPC_PORT` for the on-chain access-check
+client (`pkg/grpc`).
+
+### Ops server (separate port, `MON_PORT`)
+
+- `GET /ping`, `GET /ready` — health probes.
+- `GET /metrics` — Prometheus metrics.
+- `/debug/pprof/*` — enabled only when `ENABLE_PPROF=true`.
+
+## Configuration (environment)
+
+| Variable | Required | Default | Notes |
+|----------|----------|---------|-------|
+| `ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://auth-roles-rights.dimo.zone`. Also the host of its JWKS. |
+| `JWT_KEY_SET_URL` | yes | — | JWKS used to validate the inbound dauth token (point at dauth's `/keys`). |
+| `BLOCKCHAIN_NODE_URL` | yes | — | Ethereum RPC for SACD/contract reads. |
+| `IDENTITY_URL` | yes | — | identity-api GraphQL endpoint (dev-license + SACD lookups). |
+| `IPFS_BASE_URL` | yes | — | IPFS gateway for template/permission documents. |
+| `SIGNING_KEY_1`, `SIGNING_KEY_2`, … | yes | — | PEM RSA private keys (independent of dauth's). `_1` is the active signer. |
+| `TOKEN_EXPIRATION` | no | `10m` | Permission-token lifetime. |
+| `CONTRACT_ADDRESS_SACD` | no | — | SACD contract address. |
+| `CONTRACT_ADDRESS_TEMPLATE` | no | — | Permission-template contract address. |
+| `CONTRACT_ADDRESS_MANUFACTURER` | no | — | Manufacturer NFT contract address. |
+| `CONTRACT_ADDRESS_VEHICLE` | no | — | Vehicle NFT contract address. |
+| `DIMO_REGISTRY_CHAIN_ID` | no | `137` | Chain id for on-chain registry reads. |
+| `IPFS_TIMEOUT` | no | `30s` | Bounds each IPFS fetch. |
+| `PORT` | no | `8080` | HTTP listen port. |
+| `GRPC_PORT` | no | `8086` | gRPC listen port. |
+| `MON_PORT` | no | `8888` | Ops listen port. |
+| `ENABLE_PPROF` | no | `false` | Exposes `/debug/pprof/*` on the ops server. |
+| `ENVIRONMENT` | no | `local` | Deployment environment label. |
+| `SERVICE_NAME` | no | `token-exchange-api` | Service name label. |
+| `LOG_LEVEL` | no | `info` | zerolog level. |
+
+---
+
+# Deployment
+
+- Containers: `docker build -f docker/dockerfile .` (dauth) and
+  `docker build -f docker/dockerfile.token-exchange-api .` (token-exchange-api).
+  Both are static binaries on `distroless/static`.
+- Helm: `charts/dauth/` and `charts/token-exchange-api/`, each with `values.yaml`
+  (dev) and `values-prod.yaml`. Signing keys (and dauth's `RPC_URL`) are pulled
+  via an `ExternalSecret`; each service references its own key at
+  `<ns>/dauth/signing_key_1` and `<ns>/token-exchange-api/signing_key_1`
+  respectively.
+- **Run dauth as a single replica.** Its nonce store is in-memory, so a challenge
+  must be redeemed on the pod that issued it. To scale out, back the `nonce.Store`
+  with a shared store (e.g. Redis) first. token-exchange-api is stateless and
+  scales independently.
+- token-exchange-api's `JWT_KEY_SET_URL` must point at the dauth deployment's
+  `/keys`; downstream consumers of the permission token point their JWKS URL at
+  token-exchange-api's `/keys`.
+
+# Development
 
 ```sh
 go test ./...
 go build ./cmd/dauth
+go build ./cmd/token-exchange-api
 ```
