@@ -1,12 +1,13 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/keyset"
+	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/tokenexchange/config"
 	"github.com/DIMO-Network/dauth/internal/tokenexchange/contracts/sacd"
 	"github.com/DIMO-Network/dauth/internal/tokenexchange/contracts/template"
@@ -107,6 +108,16 @@ func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *ke
 		return nil, fmt.Errorf("failed to build JWT auth middleware: %w", err)
 	}
 
+	wellKnown, err := oidc.NewWellKnown(oidc.Config{
+		Issuer:          settings.Issuer,
+		JWKSURI:         settings.Issuer + "/keys",
+		Keys:            keys,
+		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "asset", "permissions", "cloud_events"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to render well-known surface: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", healthCheck)
 
@@ -115,18 +126,22 @@ func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *ke
 	mux.Handle("GET /v1/swagger/", httpSwagger.WrapHandler)
 
 	// This service signs permission tokens with its own keyset and publishes the
-	// public halves here, taking over the JWKS endpoint DEX used to serve.
-	mux.Handle("GET /keys", jwksHandler(keys))
-	mux.Handle("GET /.well-known/jwks.json", jwksHandler(keys))
-	mux.Handle("GET /.well-known/openid-configuration", discoveryHandler(settings.Issuer))
+	// public halves here (shared oidc surface), taking over the JWKS endpoint DEX
+	// used to serve.
+	mux.Handle("GET /keys", wellKnown.JWKS())
+	mux.Handle("GET /.well-known/jwks.json", wellKnown.JWKS())
+	mux.Handle("GET /.well-known/openid-configuration", wellKnown.Discovery())
 
 	// The exchange endpoint requires a valid (signature-checked) dauth token from
-	// a registered developer license.
-	exchange := jwtAuth(devLicense(http.HandlerFunc(httpCtrl.ExchangeToken)))
+	// a registered developer license; the body is capped since requests are tiny.
+	exchange := httpmw.MaxBytes(maxRequestBytes)(jwtAuth(devLicense(http.HandlerFunc(httpCtrl.ExchangeToken))))
 	mux.Handle("POST /v1/tokens/exchange", exchange)
 
-	return recoverMiddleware(logger)(mux), nil
+	return httpmw.Recover(logger)(mux), nil
 }
+
+// maxRequestBytes caps the exchange request body; the payload is small JSON.
+const maxRequestBytes = 1 << 20 // 1 MiB
 
 func createGRPCServer(rpcCtrl *rpc.TokenExchangeServer) *grpc.Server {
 	grpcPanic := metrics.GRPCPanicker{}
@@ -145,51 +160,4 @@ func createGRPCServer(rpcCtrl *rpc.TokenExchangeServer) *grpc.Server {
 func healthCheck(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"data":"Server is up and running"}`))
-}
-
-// jwksHandler serves the public halves of this service's signing keys as a JWKS
-// (RFC 7517) for downstream validators.
-func jwksHandler(keys *keyset.KeySet) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		body, err := keys.JWKS()
-		if err != nil {
-			http.Error(w, "failed to render JWKS", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "public, max-age=300")
-		_, _ = w.Write(body)
-	})
-}
-
-// discoveryHandler serves a minimal OIDC discovery document pointing at this
-// service's issuer and JWKS.
-func discoveryHandler(issuer string) http.Handler {
-	doc, _ := json.Marshal(map[string]any{
-		"issuer":                                issuer,
-		"jwks_uri":                              issuer + "/keys",
-		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"response_types_supported":              []string{"token"},
-		"subject_types_supported":               []string{"public"},
-	})
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(doc)
-	})
-}
-
-// recoverMiddleware turns a handler panic into a 500 instead of crashing the
-// process, logging the recovered value.
-func recoverMiddleware(log zerolog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				if v := recover(); v != nil {
-					log.Error().Interface("panic", v).Str("path", r.URL.Path).Msg("recovered from panic")
-					http.Error(w, "internal server error", http.StatusInternalServerError)
-				}
-			}()
-			next.ServeHTTP(w, r)
-		})
-	}
 }

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/DIMO-Network/dauth/internal/httpmw"
+	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 )
@@ -25,7 +27,7 @@ const (
 type AuthConfig struct {
 	Addr           string
 	Handlers       *Handlers
-	WellKnown      *WellKnown
+	WellKnown      *oidc.WellKnown
 	MaxBodyBytes   int64
 	RateLimitRPS   float64
 	RateLimitBurst int
@@ -54,8 +56,8 @@ func NewAuthServer(cfg AuthConfig) (*http.Server, error) {
 
 	// Per-request guards applied only to the write endpoints.
 	guard := func(next http.Handler) http.Handler {
-		h := maxBytesMiddleware(cfg.MaxBodyBytes)(next)
-		h = rateLimitMiddleware(cfg.RateLimitRPS, cfg.RateLimitBurst)(h)
+		h := httpmw.MaxBytes(cfg.MaxBodyBytes)(next)
+		h = httpmw.RateLimit(cfg.RateLimitRPS, cfg.RateLimitBurst)(h)
 		return h
 	}
 
@@ -66,7 +68,7 @@ func NewAuthServer(cfg AuthConfig) (*http.Server, error) {
 	mux.Handle("GET /keys", cfg.WellKnown.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", cfg.WellKnown.JWKS())
 
-	handler := recoverMiddleware(cfg.Logger)(mux)
+	handler := httpmw.Recover(cfg.Logger)(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

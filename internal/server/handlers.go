@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/nonce"
 	"github.com/DIMO-Network/dauth/internal/signer"
 	"github.com/DIMO-Network/dauth/internal/siwe"
@@ -160,7 +161,7 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 		if !valid {
-			h.Log.Warn().Str("address", ch.Address.Hex()).Str("remote", remoteIPKey(r)).Msg("invalid signature")
+			h.Log.Warn().Str("address", ch.Address.Hex()).Str("remote", httpmw.RemoteIP(r)).Msg("invalid signature")
 			writeError(w, http.StatusUnauthorized, "invalid_grant", "signature does not match address")
 			return
 		}

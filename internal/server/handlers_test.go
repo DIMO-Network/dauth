@@ -19,6 +19,7 @@ import (
 
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/nonce"
+	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/signer"
 	"github.com/DIMO-Network/dauth/internal/token"
 	"github.com/ethereum/go-ethereum/accounts"
@@ -68,7 +69,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		ChallengeTTL: 5 * time.Minute,
 		Log:          zerolog.Nop(),
 	}
-	wk, err := NewWellKnown(issuer, issuer+"/keys", ks)
+	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: issuer, JWKSURI: issuer + "/keys", Keys: ks})
 	require.NoError(t, err)
 	srv, err := NewAuthServer(AuthConfig{Handlers: h, WellKnown: wk, Logger: zerolog.Nop()})
 	require.NoError(t, err)
