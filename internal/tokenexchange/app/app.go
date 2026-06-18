@@ -20,7 +20,6 @@ import (
 	"github.com/DIMO-Network/dauth/internal/tokenexchange/services/sacdproxy"
 	templatesvs "github.com/DIMO-Network/dauth/internal/tokenexchange/services/template"
 	txgrpc "github.com/DIMO-Network/dauth/pkg/grpc"
-	"github.com/DIMO-Network/shared/pkg/middleware/metrics"
 	"github.com/ethereum/go-ethereum/ethclient"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
@@ -29,6 +28,8 @@ import (
 	"github.com/rs/zerolog"
 	httpSwagger "github.com/swaggo/http-swagger/v2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // CreateServers creates the HTTP handler and gRPC server for the application.
@@ -144,12 +145,14 @@ func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *ke
 const maxRequestBytes = 1 << 20 // 1 MiB
 
 func createGRPCServer(rpcCtrl *rpc.TokenExchangeServer) *grpc.Server {
-	grpcPanic := metrics.GRPCPanicker{}
+	recoverPanic := func(p any) error {
+		return status.Errorf(codes.Internal, "panic: %v", p)
+	}
 	server := grpc.NewServer(
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
 			grpc_ctxtags.UnaryServerInterceptor(),
 			grpc_prometheus.UnaryServerInterceptor,
-			recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(grpcPanic.GRPCPanicRecoveryHandler)),
+			recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(recoverPanic)),
 		)),
 		grpc.StreamInterceptor(grpc_prometheus.StreamServerInterceptor),
 	)
