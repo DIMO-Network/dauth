@@ -158,7 +158,7 @@ Counterfactual (undeployed) smart accounts (EIP-6492) are not supported.
 | `RPC_URL` | no | — | Ethereum RPC for EIP-1271; empty disables smart-account login. |
 | `RPC_TIMEOUT` | no | `3s` | Bounds each EIP-1271 call. |
 | `CHALLENGE_TTL` | no | `5m` | Challenge lifetime. |
-| `TOKEN_TTL` | no | `10m` | Access-token lifetime. |
+| `TOKEN_TTL` | no | `1h` | Access-token lifetime. |
 | `ALLOWABLE_TIME_SKEW` | no | `5m` | Clock skew tolerance. |
 | `AUTH_ADDRESS` | no | `0.0.0.0:8080` | Public listen address. |
 | `OPS_ADDRESS` | no | `0.0.0.0:8081` | Ops listen address. |

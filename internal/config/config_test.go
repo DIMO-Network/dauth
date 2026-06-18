@@ -26,7 +26,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, []string{"dimo"}, s.Audience)
 	assert.Equal(t, uint64(137), s.ChainID)
 	assert.Equal(t, 5*time.Minute, s.ChallengeTTL)
-	assert.Equal(t, 10*time.Minute, s.TokenTTL)
+	assert.Equal(t, time.Hour, s.TokenTTL)
 	assert.Len(t, s.SigningKeys, 1)
 }
 
