@@ -1,4 +1,9 @@
-package server
+// Package oidc serves the standards-based token-validation surface shared by
+// both binaries: an OIDC discovery document and the JWKS. Neither dauth nor
+// token-exchange is a full OAuth2 authorization server — they issue tokens
+// through their own flows and publish keys for offline validation — so the
+// authorization and token endpoints are intentionally absent.
+package oidc
 
 import (
 	"encoding/json"
@@ -7,19 +12,27 @@ import (
 	"github.com/DIMO-Network/dauth/internal/keyset"
 )
 
-// WellKnown serves the standards-based validation surface: OIDC discovery and
-// the JWKS. Both documents are static for the process lifetime (the key set is
-// fixed at startup), so they are rendered once and served from memory with
-// cache headers.
+// Config describes the discovery/JWKS surface for one issuer.
+type Config struct {
+	// Issuer is the iss value and the base of the discovery document.
+	Issuer string
+	// JWKSURI is the absolute URL where the JWKS is served.
+	JWKSURI string
+	// Keys is the signing key set whose public halves are published.
+	Keys *keyset.KeySet
+	// ClaimsSupported lists the claims tokens may carry (advisory). Defaults to
+	// the registered claim set if empty.
+	ClaimsSupported []string
+}
+
+// WellKnown serves OIDC discovery and the JWKS. Both documents are static for
+// the process lifetime (the key set is fixed at startup), so they are rendered
+// once and served from memory with cache headers.
 type WellKnown struct {
 	discovery []byte
 	jwks      []byte
 }
 
-// discoveryDoc is the subset of the OIDC discovery metadata dauth supports.
-// dauth is not a full OAuth2 authorization server — it only issues tokens via
-// the SIWE flow and publishes keys for validation — so the authorization and
-// token endpoints are intentionally absent.
 type discoveryDoc struct {
 	Issuer                           string   `json:"issuer"`
 	JWKSURI                          string   `json:"jwks_uri"`
@@ -30,23 +43,28 @@ type discoveryDoc struct {
 	ClaimsSupported                  []string `json:"claims_supported"`
 }
 
-// NewWellKnown renders the discovery document and JWKS for the given issuer,
-// jwks URI, and key set.
-func NewWellKnown(issuer, jwksURI string, keys *keyset.KeySet) (*WellKnown, error) {
+var registeredClaims = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti"}
+
+// NewWellKnown renders the discovery document and JWKS for cfg.
+func NewWellKnown(cfg Config) (*WellKnown, error) {
+	claims := cfg.ClaimsSupported
+	if len(claims) == 0 {
+		claims = registeredClaims
+	}
 	doc := discoveryDoc{
-		Issuer:                           issuer,
-		JWKSURI:                          jwksURI,
+		Issuer:                           cfg.Issuer,
+		JWKSURI:                          cfg.JWKSURI,
 		ResponseTypesSupported:           []string{"none"},
 		SubjectTypesSupported:            []string{"public"},
 		IDTokenSigningAlgValuesSupported: []string{"RS256"},
 		ScopesSupported:                  []string{"openid"},
-		ClaimsSupported:                  []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "ethereum_address"},
+		ClaimsSupported:                  claims,
 	}
 	discovery, err := json.Marshal(doc)
 	if err != nil {
 		return nil, err
 	}
-	jwks, err := keys.JWKS()
+	jwks, err := cfg.Keys.JWKS()
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +73,7 @@ func NewWellKnown(issuer, jwksURI string, keys *keyset.KeySet) (*WellKnown, erro
 
 // Discovery serves GET /.well-known/openid-configuration.
 func (wk *WellKnown) Discovery() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		_, _ = w.Write(wk.discovery)
@@ -66,7 +84,7 @@ func (wk *WellKnown) Discovery() http.Handler {
 // validators pick up a rotated key promptly while still caching across the
 // flood of verification traffic.
 func (wk *WellKnown) JWKS() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		_, _ = w.Write(wk.jwks)

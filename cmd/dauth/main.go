@@ -17,6 +17,7 @@ import (
 	"github.com/DIMO-Network/dauth/internal/config"
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/nonce"
+	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/server"
 	"github.com/DIMO-Network/dauth/internal/signer"
 	"github.com/DIMO-Network/dauth/internal/token"
@@ -86,7 +87,12 @@ func run(log zerolog.Logger) error {
 		Log:          log,
 	}
 
-	wellKnown, err := server.NewWellKnown(settings.Issuer, settings.Issuer+"/keys", keys)
+	wellKnown, err := oidc.NewWellKnown(oidc.Config{
+		Issuer:          settings.Issuer,
+		JWKSURI:         settings.Issuer + "/keys",
+		Keys:            keys,
+		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "ethereum_address"},
+	})
 	if err != nil {
 		return err
 	}

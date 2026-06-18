@@ -77,10 +77,10 @@ func TestVerifyEOA_TamperedMessage(t *testing.T) {
 // would panic, which is fine because the tested path never calls them.
 type fakeBackend struct {
 	bind.ContractBackend
-	code     []byte
-	callRet  []byte
-	callErr  error
-	codeErr  error
+	code    []byte
+	callRet []byte
+	callErr error
+	codeErr error
 }
 
 func (f *fakeBackend) CodeAt(_ context.Context, _ common.Address, _ *big.Int) ([]byte, error) {

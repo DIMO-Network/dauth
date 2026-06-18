@@ -1,4 +1,6 @@
-package server
+// Package httpmw holds the net/http middleware shared by both binaries: body
+// caps, panic recovery, and a bounded per-remote rate limiter.
+package httpmw
 
 import (
 	"hash/fnv"
@@ -11,8 +13,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// maxBytesMiddleware caps request body reads at limit bytes.
-func maxBytesMiddleware(limit int64) func(http.Handler) http.Handler {
+// MaxBytes caps request body reads at limit bytes.
+func MaxBytes(limit int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Body != nil {
@@ -23,9 +25,9 @@ func maxBytesMiddleware(limit int64) func(http.Handler) http.Handler {
 	}
 }
 
-// recoverMiddleware turns a handler panic into a 500 instead of crashing the
-// process, logging the recovered value.
-func recoverMiddleware(log zerolog.Logger) func(http.Handler) http.Handler {
+// Recover turns a handler panic into a 500 instead of crashing the process,
+// logging the recovered value.
+func Recover(log zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
@@ -110,9 +112,9 @@ func (s *limiterShard) evictLocked(burst int) {
 	}
 }
 
-// rateLimitMiddleware enforces a per-remote-IP token bucket, answering 429 when
-// the bucket is empty. rps <= 0 disables limiting.
-func rateLimitMiddleware(rps float64, burst int) func(http.Handler) http.Handler {
+// RateLimit enforces a per-remote-IP token bucket, answering 429 when the
+// bucket is empty. rps <= 0 disables limiting.
+func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	if rps <= 0 {
 		return func(next http.Handler) http.Handler { return next }
 	}
@@ -125,7 +127,7 @@ func rateLimitMiddleware(rps float64, burst int) func(http.Handler) http.Handler
 	limiter := newRemoteLimiter(rps, burst)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.allow(remoteIPKey(r)) {
+			if !limiter.allow(RemoteIP(r)) {
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}
@@ -134,7 +136,9 @@ func rateLimitMiddleware(rps float64, burst int) func(http.Handler) http.Handler
 	}
 }
 
-func remoteIPKey(r *http.Request) string {
+// RemoteIP returns the request's remote host address (without port), the key
+// used for rate limiting and request logging.
+func RemoteIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
