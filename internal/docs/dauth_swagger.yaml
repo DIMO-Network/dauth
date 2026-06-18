@@ -1,0 +1,142 @@
+basePath: /
+definitions:
+  server.challengeRequest:
+    properties:
+      address:
+        example: 0x6E4...A1b
+        type: string
+    type: object
+  server.challengeResponse:
+    properties:
+      challenge:
+        example: auth.dimo.zone wants you to sign in with your Ethereum account:...
+        type: string
+      expires_at:
+        example: "2026-06-14T17:25:00Z"
+        type: string
+      nonce:
+        example: a1b2c3...
+        type: string
+    type: object
+  server.errorResponse:
+    properties:
+      error:
+        example: invalid_grant
+        type: string
+      error_description:
+        example: challenge not found, already used, or expired
+        type: string
+    type: object
+  server.tokenRequest:
+    properties:
+      nonce:
+        example: a1b2c3...
+        type: string
+      signature:
+        example: 0x1c8f...
+        type: string
+    type: object
+  server.tokenResponse:
+    properties:
+      expires_in:
+        example: 600
+        type: integer
+      token:
+        example: eyJ...
+        type: string
+      token_type:
+        example: Bearer
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    DIMO Web3 sign-in. A client signs a Sign-In With Ethereum
+    (EIP-4361) challenge and receives a short-lived RS256 JWT carrying
+    its Ethereum address, verifiable offline against the published JWKS.
+  title: dauth API
+  version: "1.0"
+paths:
+  /auth/challenge:
+    post:
+      consumes:
+      - application/json
+      description: Generates an EIP-4361 (Sign-In With Ethereum) message for the given
+        address and records its single-use nonce. The client signs the returned `challenge`
+        string with its wallet and submits it to POST /auth/token. The chain is fixed
+        by server config.
+      parameters:
+      - description: Address to sign in
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/server.challengeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.challengeResponse'
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+        "429":
+          description: rate limited
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+        "500":
+          description: server_error
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+        "503":
+          description: challenge store unavailable
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+      summary: Request a SIWE challenge
+      tags:
+      - auth
+  /auth/token:
+    post:
+      consumes:
+      - application/json
+      description: Looks up the stored challenge by nonce, consumes it (single-use),
+        and verifies the signature over the canonical SIWE message — EOA via ecrecover,
+        or a deployed smart account via EIP-1271. On success, mints a short-lived
+        RS256 JWT carrying the address.
+      parameters:
+      - description: Nonce and 0x-prefixed signature
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/server.tokenRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.tokenResponse'
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+        "401":
+          description: invalid_grant
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+        "500":
+          description: server_error
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+        "503":
+          description: verification backend unavailable
+          schema:
+            $ref: '#/definitions/server.errorResponse'
+      summary: Exchange a signed challenge for an access token
+      tags:
+      - auth
+swagger: "2.0"

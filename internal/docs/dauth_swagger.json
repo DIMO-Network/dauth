@@ -1,0 +1,199 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "DIMO Web3 sign-in. A client signs a Sign-In With Ethereum\n(EIP-4361) challenge and receives a short-lived RS256 JWT carrying\nits Ethereum address, verifiable offline against the published JWKS.",
+        "title": "dauth API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "basePath": "/",
+    "paths": {
+        "/auth/challenge": {
+            "post": {
+                "description": "Generates an EIP-4361 (Sign-In With Ethereum) message for the given address and records its single-use nonce. The client signs the returned `challenge` string with its wallet and submits it to POST /auth/token. The chain is fixed by server config.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Request a SIWE challenge",
+                "parameters": [
+                    {
+                        "description": "Address to sign in",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/server.challengeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/server.challengeResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "rate limited",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "server_error",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "challenge store unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/token": {
+            "post": {
+                "description": "Looks up the stored challenge by nonce, consumes it (single-use), and verifies the signature over the canonical SIWE message — EOA via ecrecover, or a deployed smart account via EIP-1271. On success, mints a short-lived RS256 JWT carrying the address.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Exchange a signed challenge for an access token",
+                "parameters": [
+                    {
+                        "description": "Nonce and 0x-prefixed signature",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/server.tokenRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/server.tokenResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "invalid_grant",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "server_error",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "verification backend unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/server.errorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "server.challengeRequest": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string",
+                    "example": "0x6E4...A1b"
+                }
+            }
+        },
+        "server.challengeResponse": {
+            "type": "object",
+            "properties": {
+                "challenge": {
+                    "type": "string",
+                    "example": "auth.dimo.zone wants you to sign in with your Ethereum account:..."
+                },
+                "expires_at": {
+                    "type": "string",
+                    "example": "2026-06-14T17:25:00Z"
+                },
+                "nonce": {
+                    "type": "string",
+                    "example": "a1b2c3..."
+                }
+            }
+        },
+        "server.errorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string",
+                    "example": "invalid_grant"
+                },
+                "error_description": {
+                    "type": "string",
+                    "example": "challenge not found, already used, or expired"
+                }
+            }
+        },
+        "server.tokenRequest": {
+            "type": "object",
+            "properties": {
+                "nonce": {
+                    "type": "string",
+                    "example": "a1b2c3..."
+                },
+                "signature": {
+                    "type": "string",
+                    "example": "0x1c8f..."
+                }
+            }
+        },
+        "server.tokenResponse": {
+            "type": "object",
+            "properties": {
+                "expires_in": {
+                    "type": "integer",
+                    "example": 600
+                },
+                "token": {
+                    "type": "string",
+                    "example": "eyJ..."
+                },
+                "token_type": {
+                    "type": "string",
+                    "example": "Bearer"
+                }
+            }
+        }
+    }
+}

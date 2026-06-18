@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/config"
+	_ "github.com/DIMO-Network/dauth/internal/docs" // registers the generated OpenAPI spec (instance "dauth")
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/nonce"
 	"github.com/DIMO-Network/dauth/internal/oidc"
@@ -32,6 +33,18 @@ import (
 // under a challenge flood, where rejecting new challenges is the right answer.
 const maxOutstandingChallenges = 100_000
 
+// @title       dauth API
+// @version     1.0
+// @description DIMO Web3 sign-in. A client signs a Sign-In With Ethereum
+// @description (EIP-4361) challenge and receives a short-lived RS256 JWT carrying
+// @description its Ethereum address, verifiable offline against the published JWKS.
+// @BasePath    /
+//
+// The spec is generated into a dauth-specific package under the instance name
+// "dauth" so it never collides with token-exchange-api's spec (instance
+// "swagger") in this shared module. The exclude keeps tokenexchange routes out.
+//
+//go:generate go tool swag init -g main.go -d ./cmd/dauth,./internal/server -o ./internal/docs --instanceName dauth --parseInternal
 func main() {
 	log := zerolog.New(os.Stdout).With().Timestamp().Str("app", "dauth").Logger()
 	if err := run(log); err != nil {

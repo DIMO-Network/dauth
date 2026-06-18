@@ -1,0 +1,2 @@
+# Signing keys (the README's openssl example writes signing.pem here)
+*.pem

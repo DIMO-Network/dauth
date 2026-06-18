@@ -40,28 +40,48 @@ func (h *Handlers) now() time.Time {
 }
 
 type challengeRequest struct {
-	Address string `json:"address"`
+	Address string `json:"address" example:"0x6E4...A1b"`
 }
 
 type challengeResponse struct {
-	Challenge string `json:"challenge"`
-	Nonce     string `json:"nonce"`
-	ExpiresAt string `json:"expires_at"`
+	Challenge string `json:"challenge" example:"auth.dimo.zone wants you to sign in with your Ethereum account:..."`
+	Nonce     string `json:"nonce" example:"a1b2c3..."`
+	ExpiresAt string `json:"expires_at" example:"2026-06-14T17:25:00Z"`
 }
 
 type tokenRequest struct {
-	Nonce     string `json:"nonce"`
-	Signature string `json:"signature"`
+	Nonce     string `json:"nonce" example:"a1b2c3..."`
+	Signature string `json:"signature" example:"0x1c8f..."`
 }
 
 type tokenResponse struct {
-	Token     string `json:"token"`
-	TokenType string `json:"token_type"`
-	ExpiresIn int    `json:"expires_in"`
+	Token     string `json:"token" example:"eyJ..."`
+	TokenType string `json:"token_type" example:"Bearer"`
+	ExpiresIn int    `json:"expires_in" example:"600"`
+}
+
+// errorResponse is the OAuth-style error body returned on failure. Clients
+// branch on the stable `error` code rather than parsing the description.
+type errorResponse struct {
+	Error            string `json:"error" example:"invalid_grant"`
+	ErrorDescription string `json:"error_description" example:"challenge not found, already used, or expired"`
 }
 
 // Challenge issues a SIWE message for the requested address and records its
 // single-use nonce.
+//
+// @Summary     Request a SIWE challenge
+// @Description Generates an EIP-4361 (Sign-In With Ethereum) message for the given address and records its single-use nonce. The client signs the returned `challenge` string with its wallet and submits it to POST /auth/token. The chain is fixed by server config.
+// @Tags        auth
+// @Accept      json
+// @Produce     json
+// @Param       request body server.challengeRequest true "Address to sign in"
+// @Success     200 {object} server.challengeResponse
+// @Failure     400 {object} server.errorResponse "invalid_request"
+// @Failure     429 {object} server.errorResponse "rate limited"
+// @Failure     500 {object} server.errorResponse "server_error"
+// @Failure     503 {object} server.errorResponse "challenge store unavailable"
+// @Router      /auth/challenge [post]
 func (h *Handlers) Challenge() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req challengeRequest
@@ -120,6 +140,19 @@ func (h *Handlers) Challenge() http.Handler {
 }
 
 // Token verifies a signed challenge and returns an access token.
+//
+// @Summary     Exchange a signed challenge for an access token
+// @Description Looks up the stored challenge by nonce, consumes it (single-use), and verifies the signature over the canonical SIWE message — EOA via ecrecover, or a deployed smart account via EIP-1271. On success, mints a short-lived RS256 JWT carrying the address.
+// @Tags        auth
+// @Accept      json
+// @Produce     json
+// @Param       request body server.tokenRequest true "Nonce and 0x-prefixed signature"
+// @Success     200 {object} server.tokenResponse
+// @Failure     400 {object} server.errorResponse "invalid_request"
+// @Failure     401 {object} server.errorResponse "invalid_grant"
+// @Failure     500 {object} server.errorResponse "server_error"
+// @Failure     503 {object} server.errorResponse "verification backend unavailable"
+// @Router      /auth/token [post]
 func (h *Handlers) Token() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req tokenRequest
@@ -196,8 +229,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError emits an OAuth-style error body so clients can branch on a stable
 // code without parsing prose.
 func writeError(w http.ResponseWriter, status int, code, description string) {
-	writeJSON(w, status, map[string]string{
-		"error":             code,
-		"error_description": description,
-	})
+	writeJSON(w, status, errorResponse{Error: code, ErrorDescription: description})
 }
