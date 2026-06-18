@@ -102,6 +102,7 @@ rate limit.
 
 - `GET /.well-known/openid-configuration` — OIDC discovery metadata.
 - `GET /keys` (alias `GET /.well-known/jwks.json`) — JWKS (RFC 7517).
+- `GET /swagger/` — interactive OpenAPI docs for the sign-in endpoints.
 
 ### Ops server (separate port)
 

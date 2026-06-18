@@ -14,6 +14,7 @@ import (
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
 )
 
 const (
@@ -67,6 +68,10 @@ func NewAuthServer(cfg AuthConfig) (*http.Server, error) {
 	mux.Handle("GET /.well-known/openid-configuration", cfg.WellKnown.Discovery())
 	mux.Handle("GET /keys", cfg.WellKnown.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", cfg.WellKnown.JWKS())
+
+	// Interactive OpenAPI docs. Served under dauth's own spec instance ("dauth")
+	// so it never collides with token-exchange-api's spec in this shared module.
+	mux.Handle("GET /swagger/", httpSwagger.Handler(httpSwagger.InstanceName("dauth")))
 
 	handler := httpmw.Recover(cfg.Logger)(mux)
 
