@@ -110,7 +110,7 @@ func Load() (Settings, error) {
 	if s.ChallengeTTL, err = envDuration("CHALLENGE_TTL", 5*time.Minute); err != nil {
 		return s, err
 	}
-	if s.TokenTTL, err = envDuration("TOKEN_TTL", 10*time.Minute); err != nil {
+	if s.TokenTTL, err = envDuration("TOKEN_TTL", time.Hour); err != nil {
 		return s, err
 	}
 	if s.AllowableTimeSkew, err = envDuration("ALLOWABLE_TIME_SKEW", 5*time.Minute); err != nil {
