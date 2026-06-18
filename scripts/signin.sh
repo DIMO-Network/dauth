@@ -72,7 +72,13 @@ decode_segment() {
 }
 
 note "Token acquired — decoded claims:"
-decode_segment "$(cut -d. -f2 <<<"$JWT")" | jq .
+CLAIMS="$(decode_segment "$(cut -d. -f2 <<<"$JWT")")"
+jq . <<<"$CLAIMS"
+
+# Human-readable expiry from the exp claim (date(1) differs on macOS vs GNU).
+EXP="$(jq -r .exp <<<"$CLAIMS")"
+EXP_HUMAN="$(date -r "$EXP" 2>/dev/null || date -d "@$EXP" 2>/dev/null || echo "epoch $EXP")"
+note "Expires: $EXP_HUMAN ($(jq -r .expires_in <<<"$TOK")s after issue)"
 
 echo
 note "Raw token:"
