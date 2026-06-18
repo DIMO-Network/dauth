@@ -1,0 +1,13 @@
+name: Helm Lint
+on: pull_request
+
+jobs:
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - name: Lint dauth chart
+        run: helm lint charts/dauth
+      - name: Lint token-exchange-api chart
+        run: helm lint charts/token-exchange-api

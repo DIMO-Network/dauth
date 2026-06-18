@@ -1,0 +1,30 @@
+# Sample configuration for the token-exchange-api binary (cmd/token-exchange-api).
+# Copy to settings.yaml for local development.
+#
+# NOTE: the dauth binary (cmd/dauth) is configured via environment variables, not
+# this file — see the dauth README. Signing keys for BOTH binaries come from the
+# environment as SIGNING_KEY_1, SIGNING_KEY_2, ... (token-exchange uses its own
+# key, distinct from dauth's).
+ENVIRONMENT: local
+PORT: 3000
+MON_PORT: 8888
+GRPC_PORT: 8086
+LOG_LEVEL: info
+SERVICE_NAME: token-exchange-api
+
+# Issuer stamped on minted permission tokens; also identifies the JWKS this
+# service publishes at /keys.
+ISSUER: https://auth-roles-rights.dimo.zone
+# Permission-token lifetime (matches the value DEX issued before the cutover).
+TOKEN_EXPIRATION: 10m
+# JWKS used to validate inbound dauth (address-control) tokens. Locally this is
+# the dauth binary's /keys; in prod it is dauth's published JWKS.
+JWT_KEY_SET_URL: http://127.0.0.1:8080/keys
+
+BLOCKCHAIN_NODE_URL: http://127.0.0.1:8545
+CONTRACT_ADDRESS_SACD: 0x123
+CONTRACT_ADDRESS_TEMPLATE: 0x123
+IDENTITY_URL: https://identity-api.dimo.zone/query
+IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
+IPFS_TIMEOUT: 30s
+DIMO_REGISTRY_CHAIN_ID: 137
