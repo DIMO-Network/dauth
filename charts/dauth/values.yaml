@@ -2,7 +2,7 @@ replicaCount: 1
 image:
   repository: dimozone/dauth
   pullPolicy: IfNotPresent
-  tag: f111669
+  tag: 35508c0
 imagePullSecrets: []
 nameOverride: ''
 fullnameOverride: ''
