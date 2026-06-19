@@ -316,3 +316,12 @@ go test ./...
 go build ./cmd/dauth
 go build ./cmd/token-exchange-api
 ```
+
+With a dauth instance running, `scripts/signin.sh` drives the full SIWE flow —
+it generates a throwaway key, requests a challenge, signs it with Foundry's
+`cast`, exchanges it for a token, and prints the decoded claims (requires `cast`,
+`curl`, and `jq`):
+
+```sh
+BASE_URL=http://localhost:8080 scripts/signin.sh
+```
