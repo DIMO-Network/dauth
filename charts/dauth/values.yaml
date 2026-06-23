@@ -2,7 +2,7 @@ replicaCount: 1
 image:
   repository: dimozone/dauth
   pullPolicy: IfNotPresent
-  tag: 2fc65e1
+  tag: 48dce5c
 imagePullSecrets: []
 nameOverride: ''
 fullnameOverride: ''
@@ -26,9 +26,7 @@ env:
   LOG_LEVEL: info
   HTTP_ADDRESS: 0.0.0.0:8080
   OPS_ADDRESS: 0.0.0.0:8081
-  # Public origin of the merged service; base for each surface's jwks_uri.
   PUBLIC_BASE_URL: https://dauth.dev.dimo.zone
-  # --- sign-in surface (/siwe) ---
   SIWE_ISSUER: https://auth.dev.dimo.zone
   JWT_AUDIENCE: dimo
   SIWE_STATEMENT: Sign in to DIMO.
@@ -38,7 +36,6 @@ env:
   ALLOWABLE_TIME_SKEW: 5m
   RATE_LIMIT_RPS: '20'
   RATE_LIMIT_BURST: '40'
-  # --- token-exchange surface (/permissions) ---
   PERMISSIONS_ISSUER: https://auth-roles-rights.dev.dimo.zone
   TOKEN_EXPIRATION: 10m
   GRPC_PORT: '8086'
@@ -52,9 +49,6 @@ env:
   IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
   IPFS_TIMEOUT: 30s
   DIMO_REGISTRY_CHAIN_ID: '80002'
-# Postgres-backed challenge store. Disabled by default: dauth uses the in-memory
-# store and must stay at replicaCount 1. Set enabled: true (fill host/name and
-# provision the db_user/db_password secrets) to share challenges across replicas.
 postgres:
   enabled: false
   host: ''
