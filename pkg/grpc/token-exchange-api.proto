@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = "github.com/DIMO-Network/token-exchange-api/pkg/grpc";
+option go_package = "github.com/DIMO-Network/dauth/pkg/grpc";
 
 
 package grpc;

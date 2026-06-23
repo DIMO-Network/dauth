@@ -33,15 +33,6 @@ jobs:
           platforms: linux/amd64
           tags: dimozone/dauth:${{ steps.slug.outputs.sha7 }}, dimozone/dauth:latest
 
-      - name: Build and push token-exchange-api
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./docker/dockerfile.token-exchange-api
-          push: true
-          platforms: linux/amd64
-          tags: dimozone/token-exchange-api:${{ steps.slug.outputs.sha7 }}, dimozone/token-exchange-api:latest
-
       - name: Update dauth image tag
         uses: fjogeleit/yaml-update-action@master
         with:
@@ -50,12 +41,3 @@ jobs:
           value: ${{ steps.slug.outputs.sha7 }}
           branch: main
           message: "Update dauth image to ${{ steps.slug.outputs.sha7 }}"
-
-      - name: Update token-exchange-api image tag
-        uses: fjogeleit/yaml-update-action@master
-        with:
-          valueFile: "charts/token-exchange-api/values.yaml"
-          propertyPath: "image.tag"
-          value: ${{ steps.slug.outputs.sha7 }}
-          branch: main
-          message: "Update token-exchange-api image to ${{ steps.slug.outputs.sha7 }}"

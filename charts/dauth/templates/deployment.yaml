@@ -5,9 +5,10 @@ metadata:
   labels:
     {{- include "dauth.labels" . | nindent 4 }}
 spec:
-  # Single replica by design: the nonce store is in-memory, so a challenge must
-  # be redeemed on the pod that issued it. Move to a shared store (e.g. Redis)
-  # before raising this.
+  # With the in-memory nonce store a challenge must be redeemed on the pod that
+  # issued it, so replicaCount must stay 1. Enabling the Postgres store
+  # (postgres.enabled) makes challenges shared across pods, at which point this
+  # can be raised safely.
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:

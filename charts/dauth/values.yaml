@@ -24,9 +24,12 @@ securityContext:
 env:
   ENVIRONMENT: dev
   LOG_LEVEL: info
-  AUTH_ADDRESS: 0.0.0.0:8080
+  HTTP_ADDRESS: 0.0.0.0:8080
   OPS_ADDRESS: 0.0.0.0:8081
-  ISSUER: https://auth.dev.dimo.zone
+  # Public origin of the merged service; base for each surface's jwks_uri.
+  PUBLIC_BASE_URL: https://dauth.dev.dimo.zone
+  # --- sign-in surface (/siwe) ---
+  SIWE_ISSUER: https://auth.dev.dimo.zone
   JWT_AUDIENCE: dimo
   SIWE_STATEMENT: Sign in to DIMO.
   CHAIN_ID: '80002'
@@ -35,12 +38,40 @@ env:
   ALLOWABLE_TIME_SKEW: 5m
   RATE_LIMIT_RPS: '20'
   RATE_LIMIT_BURST: '40'
+  # --- token-exchange surface (/permissions) ---
+  PERMISSIONS_ISSUER: https://auth-roles-rights.dev.dimo.zone
+  TOKEN_EXPIRATION: 10m
+  GRPC_PORT: '8086'
+  ENABLE_PPROF: 'false'
+  USERS_API_GRPC_ADDRESS: users-api-dev:8086
+  CONTRACT_ADDRESS_SACD: '0x4E5F9320b1c7cB3DE5ebDD760aD67375B66cF8a3'
+  CONTRACT_ADDRESS_TEMPLATE: '0xbfc07085736426295f60baa15dc70743e98fe612'
+  CONTRACT_ADDRESS_MANUFACTURER: '0xA4ad0F9c722588910791A9BAC63ADbB365614Bc7'
+  CONTRACT_ADDRESS_VEHICLE: '0x45fbCD3ef7361d156e8b16F5538AE36DEdf61Da8'
+  IDENTITY_URL: http://identity-api-dev:8080/query
+  IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
+  IPFS_TIMEOUT: 30s
+  DIMO_REGISTRY_CHAIN_ID: '80002'
+# Postgres-backed challenge store. Disabled by default: dauth uses the in-memory
+# store and must stay at replicaCount 1. Set enabled: true (fill host/name and
+# provision the db_user/db_password secrets) to share challenges across replicas.
+postgres:
+  enabled: false
+  host: ''
+  port: '5432'
+  name: dauth
+  sslMode: require
+  maxOpenConnections: '10'
+  maxIdleConnections: '5'
 ports:
   - name: http
     containerPort: 8080
     protocol: TCP
   - name: ops
     containerPort: 8081
+    protocol: TCP
+  - name: grpc
+    containerPort: 8086
     protocol: TCP
 livenessProbe:
   httpGet:
@@ -72,6 +103,10 @@ service:
       port: 8081
       targetPort: ops
       protocol: TCP
+    grpc:
+      port: 8086
+      targetPort: grpc
+      protocol: TCP
 ingress:
   enabled: true
   className: nginx
@@ -79,14 +114,14 @@ ingress:
     nginx.ingress.kubernetes.io/backend-protocol: HTTP
     external-dns.alpha.kubernetes.io/cloudflare-proxied: 'false'
   hosts:
-    - host: auth.dev.dimo.zone
+    - host: dauth.dev.dimo.zone
       paths:
         - path: /
           pathType: Prefix
           port: 8080
   tls:
     - hosts:
-        - auth.dev.dimo.zone
+        - dauth.dev.dimo.zone
       secretName: dauth-tls
 serviceMonitor:
   enabled: true

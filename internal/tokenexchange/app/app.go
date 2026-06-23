@@ -32,8 +32,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// CreateServers creates the HTTP handler and gRPC server for the application.
-func CreateServers(logger zerolog.Logger, settings *config.Settings) (http.Handler, *grpc.Server, error) {
+// CreateServers creates the HTTP handler and gRPC server for the permission
+// (/permissions) surface. The returned handler has routes relative to its mount
+// point and no panic recoverer — the merged binary mounts it under /permissions
+// and wraps both surfaces with Recover once. jwksURI is the externally reachable
+// URL where this surface's keys are published (e.g.
+// https://dauth.dimo.zone/permissions/keys), which is advertised in the
+// discovery document independently of the iss claim. jwtAuth is the inbound
+// sign-in-token validator (built from the /siwe keyset by the caller).
+func CreateServers(logger zerolog.Logger, settings *config.Settings, jwksURI string, jwtAuth func(http.Handler) http.Handler) (http.Handler, *grpc.Server, error) {
 	keys, err := keyset.Load(config.SigningKeys())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load signing keys: %w", err)
@@ -86,7 +93,7 @@ func CreateServers(logger zerolog.Logger, settings *config.Settings) (http.Handl
 		return nil, nil, fmt.Errorf("failed to create access service: %w", err)
 	}
 
-	handler, err := createHTTPServer(logger, settings, keys, signer, accessService)
+	handler, err := createHTTPServer(logger, settings, keys, signer, accessService, jwksURI, jwtAuth)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create http server: %w", err)
 	}
@@ -96,7 +103,7 @@ func CreateServers(logger zerolog.Logger, settings *config.Settings) (http.Handl
 	return handler, grpcServer, nil
 }
 
-func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *keyset.KeySet, signer *services.TokenSigner, accessService *access.Service) (http.Handler, error) {
+func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *keyset.KeySet, signer *services.TokenSigner, accessService *access.Service, jwksURI string, jwtAuth func(http.Handler) http.Handler) (http.Handler, error) {
 	httpCtrl, err := httpcontroller.NewTokenExchangeController(settings, signer, accessService)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize token exchange controller: %w", err)
@@ -104,14 +111,9 @@ func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *ke
 	idSvc := services.NewIdentityController(&logger, settings)
 	devLicense := middleware.NewDevLicenseValidator(idSvc, logger)
 
-	jwtAuth, err := middleware.NewJWTAuth(settings.JWKKeySetURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build JWT auth middleware: %w", err)
-	}
-
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
 		Issuer:          settings.Issuer,
-		JWKSURI:         settings.Issuer + "/keys",
+		JWKSURI:         jwksURI,
 		Keys:            keys,
 		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "asset", "permissions", "cloud_events"},
 	})
@@ -119,26 +121,27 @@ func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *ke
 		return nil, fmt.Errorf("failed to render well-known surface: %w", err)
 	}
 
+	// Routes are relative to the /permissions mount point. The root health check
+	// and panic recoverer live at the top level of the merged binary.
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", healthCheck)
 
 	// Interactive OpenAPI docs, served over net/http (replaces the Fiber
 	// swagger handler; the generated spec is unchanged).
-	mux.Handle("GET /v1/swagger/", httpSwagger.WrapHandler)
+	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
 
-	// This service signs permission tokens with its own keyset and publishes the
-	// public halves here (shared oidc surface), taking over the JWKS endpoint DEX
-	// used to serve.
+	// This surface signs permission tokens with its own keyset and publishes the
+	// public halves here, taking over the JWKS endpoint DEX used to serve.
 	mux.Handle("GET /keys", wellKnown.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", wellKnown.JWKS())
 	mux.Handle("GET /.well-known/openid-configuration", wellKnown.Discovery())
 
-	// The exchange endpoint requires a valid (signature-checked) dauth token from
-	// a registered developer license; the body is capped since requests are tiny.
+	// The exchange endpoint requires a valid (signature-checked) sign-in token
+	// from a registered developer license; the body is capped since requests are
+	// tiny.
 	exchange := httpmw.MaxBytes(maxRequestBytes)(jwtAuth(devLicense(http.HandlerFunc(httpCtrl.ExchangeToken))))
-	mux.Handle("POST /v1/tokens/exchange", exchange)
+	mux.Handle("POST /tokens/exchange", exchange)
 
-	return httpmw.Recover(logger)(mux), nil
+	return mux, nil
 }
 
 // maxRequestBytes caps the exchange request body; the payload is small JSON.
@@ -158,9 +161,4 @@ func createGRPCServer(rpcCtrl *rpc.TokenExchangeServer) *grpc.Server {
 	)
 	txgrpc.RegisterTokenExchangeServiceServer(server, rpcCtrl)
 	return server
-}
-
-func healthCheck(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"data":"Server is up and running"}`))
 }

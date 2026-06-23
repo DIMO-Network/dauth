@@ -15,7 +15,7 @@ const docTemplatedauth = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
-        "/auth/challenge": {
+        "/challenge": {
             "post": {
                 "description": "Generates an EIP-4361 (Sign-In With Ethereum) message for the given address and records its single-use nonce. The client signs the returned ` + "`" + `challenge` + "`" + ` string with its wallet and submits it to POST /auth/token. The chain is fixed by server config.",
                 "consumes": [
@@ -73,7 +73,7 @@ const docTemplatedauth = `{
                 }
             }
         },
-        "/auth/token": {
+        "/token": {
             "post": {
                 "description": "Looks up the stored challenge by nonce, consumes it (single-use), and verifies the signature over the canonical SIWE message — EOA via ecrecover, or a deployed smart account via EIP-1271. On success, mints a short-lived RS256 JWT carrying the address.",
                 "consumes": [
@@ -209,9 +209,9 @@ const docTemplatedauth = `{
 var SwaggerInfodauth = &swag.Spec{
 	Version:          "1.0",
 	Host:             "",
-	BasePath:         "/",
+	BasePath:         "/siwe",
 	Schemes:          []string{},
-	Title:            "dauth API",
+	Title:            "dauth sign-in API",
 	Description:      "DIMO Web3 sign-in. A client signs a Sign-In With Ethereum\n(EIP-4361) challenge and receives a short-lived RS256 JWT carrying\nits Ethereum address, verifiable offline against the published JWKS.",
 	InfoInstanceName: "dauth",
 	SwaggerTemplate:  docTemplatedauth,

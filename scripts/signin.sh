@@ -36,8 +36,8 @@ ADDR="$(cast wallet address --private-key "$PK")"
 echo "    address: $ADDR"
 
 # --- 1. challenge ------------------------------------------------------------
-note "POST $BASE_URL/auth/challenge"
-CH="$(curl -fsS -X POST "$BASE_URL/auth/challenge" \
+note "POST $BASE_URL/siwe/challenge"
+CH="$(curl -fsS -X POST "$BASE_URL/siwe/challenge" \
   -H 'content-type: application/json' \
   -d "$(jq -nc --arg a "$ADDR" '{address:$a}')")" \
   || fail "challenge request failed — is dauth running at $BASE_URL?"
@@ -54,8 +54,8 @@ SIG="$(cast wallet sign --private-key "$PK" "$MSG")"
 echo "    sig:     ${SIG:0:24}…"
 
 # --- 3. exchange -------------------------------------------------------------
-note "POST $BASE_URL/auth/token"
-TOK="$(curl -fsS -X POST "$BASE_URL/auth/token" \
+note "POST $BASE_URL/siwe/token"
+TOK="$(curl -fsS -X POST "$BASE_URL/siwe/token" \
   -H 'content-type: application/json' \
   -d "$(jq -nc --arg n "$NONCE" --arg s "$SIG" '{nonce:$n, signature:$s}')")" \
   || fail "token request failed (the nonce is single-use; a failed attempt burns it — rerun for a fresh one)"

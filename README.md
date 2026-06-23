@@ -1,42 +1,47 @@
 # dauth
 
-This repository houses DIMO's Web3 auth pipeline as two small, single-purpose
-services that together replace the heavily-forked Dex (DEX) previously used for
-Web3 login. They are two stages of one flow:
+This repository houses DIMO's Web3 auth pipeline: one binary (`cmd/dauth`)
+serving two surfaces on one host (e.g. `dauth.dimo.zone`), together replacing the
+heavily-forked Dex (DEX) previously used for Web3 login. The two surfaces are two
+stages of one flow, routed by path prefix:
 
-1. **dauth** proves *"I control this Ethereum address."* A client signs a
+1. **`/siwe`** proves *"I control this Ethereum address."* A client signs a
    [Sign-In With Ethereum](https://eips.ethereum.org/EIPS/eip-4361) (EIP-4361)
    challenge and receives a short-lived RS256 JWT carrying its address.
-2. **token-exchange-api** proves *"this address may access this asset with these
-   permissions."* It takes a dauth address-control token from a registered
+2. **`/permissions`** proves *"this address may access this asset with these
+   permissions."* It takes a `/siwe` address-control token from a registered
    developer license and, after checking on-chain/SACD access, mints a permission
    token scoped to a DIMO asset.
 
-Both are stateless and offline-verifiable: each service publishes its own JWKS
-and OIDC discovery document, and any service validates tokens against those — no
-shared secret, no callback. There is no OAuth2 authorization-code flow, refresh
-tokens, or connector framework.
+Both surfaces are stateless and offline-verifiable: each publishes its **own**
+JWKS and OIDC discovery document under its prefix, signs with its **own** RSA key,
+and keeps a **distinct** `iss` claim. Two separate keysets are the security
+boundary — a token of one kind never verifies against the other surface's JWKS.
+The shared host is pure transport; nothing here uses an OAuth2 authorization-code
+flow, refresh tokens, or a connector framework.
 
-## Services
+## Surfaces
 
-| Service | Binary | Issues | Default `iss` | Surface |
-|---------|--------|--------|---------------|---------|
-| [dauth](#dauth--address-control-tokens) | `cmd/dauth` | Address-control token (`ethereum_address`) | `https://auth.dimo.zone` | HTTP |
-| [token-exchange-api](#token-exchange-api) | `cmd/token-exchange-api` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://auth-roles-rights.dimo.zone` | HTTP + gRPC |
+| Surface | Prefix | Issues | Default `iss` | Published at |
+|---------|--------|--------|---------------|--------------|
+| [Sign-in](#siwe--address-control-tokens) | `/siwe` | Address-control token (`ethereum_address`) | `https://auth.dimo.zone` | `…/siwe/keys` |
+| [Token exchange](#permissions--token-exchange) | `/permissions` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://auth-roles-rights.dimo.zone` | `…/permissions/keys` |
 
-Each service has its own RSA signing key, its own Helm chart (`charts/dauth`,
-`charts/token-exchange-api`), and its own image. They share Go packages —
-`internal/keyset` (signing), `internal/oidc` (JWKS + discovery), and
-`internal/httpmw` (middleware) — but keep separate claims, issuers, and config.
-The public packages `pkg/tokenclaims` and `pkg/grpc` are consumed by downstream
-repos.
+The exchange also exposes a gRPC `TokenExchangeService` on its own port. The two
+surfaces share Go packages — `internal/keyset` (signing), `internal/oidc` (JWKS +
+discovery), and `internal/httpmw` (middleware) — but keep separate claims,
+issuers, signing keys, and config (sign-in config is namespaced `SIWE_*`, the
+exchange `PERMISSIONS_*`). The public packages `pkg/tokenclaims` and `pkg/grpc`
+are consumed by downstream repos.
 
-The two services are documented in full below: dauth first, then
-token-exchange-api, followed by shared deployment and development notes.
+`PUBLIC_BASE_URL` (e.g. `https://dauth.dimo.zone`) is the host both surfaces are
+reachable at; it is the base of each published `jwks_uri`, decoupled from the
+`iss` claims. The two surfaces are documented in full below: sign-in first, then
+the exchange, followed by deployment and development notes.
 
 ---
 
-# dauth — address-control tokens
+# /siwe — address-control tokens
 
 SIWE challenge → signature verify → JWT, plus a standard validation surface. The
 canonical SIWE message is generated and stored server-side; the issued JWT is
@@ -46,14 +51,14 @@ stateless.
 
 ```
 client                              dauth
-  │  POST /auth/challenge {address}   │
+  │  POST /siwe/challenge {address}   │
   │ ─────────────────────────────────▶  generate single-use nonce,
   │                                   │  build EIP-4361 message, store it
   │  ◀───────────────────────────────  { challenge, nonce, expires_at }
   │                                   │
   │  wallet personal_sign(challenge)  │
   │                                   │
-  │  POST /auth/token {nonce, sig}    │
+  │  POST /siwe/token {nonce, sig}    │
   │ ─────────────────────────────────▶  look up by nonce, consume
   │                                   │  (single-use), verify sig (EOA/1271),
   │                                   │  mint RS256 JWT
@@ -69,7 +74,7 @@ is stateless and offline-verifiable.
 
 ## API
 
-### `POST /auth/challenge`
+### `POST /siwe/challenge`
 
 ```json
 { "address": "0x6E4…A1b" }
@@ -83,7 +88,7 @@ The chain is fixed by the `CHAIN_ID` config. Response:
 }
 ```
 
-### `POST /auth/token`
+### `POST /siwe/token`
 
 ```json
 { "nonce": "…", "signature": "0x1c8f…" }
@@ -131,7 +136,7 @@ server is configured with:
 
 ```
 TOKEN_EXCHANGE_ISSUER=https://auth.dimo.zone
-TOKEN_EXCHANGE_KEY_SET_URL=https://auth.dimo.zone/keys
+TOKEN_EXCHANGE_KEY_SET_URL=https://dauth.dimo.zone/siwe/keys
 ```
 
 and validates `iss`, RS256, and the `ethereum_address` claim — no dauth-specific
@@ -148,25 +153,32 @@ Counterfactual (undeployed) smart accounts (EIP-6492) are not supported.
 
 ## Configuration (environment)
 
+The variables below configure the sign-in surface and the process as a whole.
+The exchange surface's variables are namespaced `PERMISSIONS_*` (see its own
+section); a few process-wide variables (`PUBLIC_BASE_URL`, `HTTP_ADDRESS`,
+`OPS_ADDRESS`, `LOG_LEVEL`, `ENVIRONMENT`, `DB_*`) are shared.
+
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `ISSUER` | yes | — | Absolute URL, e.g. `https://auth.dimo.zone`. Also the JWT `iss` and SIWE `uri`. |
+| `PUBLIC_BASE_URL` | yes | — | Externally reachable origin, e.g. `https://dauth.dimo.zone`. Base of each surface's `jwks_uri`; also the SIWE `uri` and default `SIWE_DOMAIN` host. |
+| `SIWE_ISSUER` | yes | — | Absolute URL, e.g. `https://auth.dimo.zone`. The sign-in JWT `iss`. |
 | `JWT_AUDIENCE` | yes | — | Comma-separated `aud` value(s). |
-| `SIGNING_KEY_1`, `SIGNING_KEY_2`, … | yes | — | PEM RSA private keys, in order. `_1` is the active signer. |
+| `SIWE_SIGNING_KEY_1`, `SIWE_SIGNING_KEY_2`, … | yes | — | PEM RSA private keys, in order. `_1` is the active signer. |
 | `CHAIN_ID` | no | `137` | Chain the sign-in is bound to (in the SIWE message). |
-| `SIWE_DOMAIN` | no | issuer host | Domain shown in the SIWE message. |
+| `SIWE_DOMAIN` | no | `PUBLIC_BASE_URL` host | Domain shown in the SIWE message. |
 | `SIWE_STATEMENT` | no | `Sign in to DIMO.` | Statement shown in the wallet. |
 | `RPC_URL` | no | — | Ethereum RPC for EIP-1271; empty disables smart-account login. |
 | `RPC_TIMEOUT` | no | `3s` | Bounds each EIP-1271 call. |
 | `CHALLENGE_TTL` | no | `5m` | Challenge lifetime. |
 | `TOKEN_TTL` | no | `1h` | Access-token lifetime. |
 | `ALLOWABLE_TIME_SKEW` | no | `5m` | Clock skew tolerance. |
-| `AUTH_ADDRESS` | no | `0.0.0.0:8080` | Public listen address. |
+| `HTTP_ADDRESS` | no | `0.0.0.0:8080` | Public listen address (both prefixes). |
 | `OPS_ADDRESS` | no | `0.0.0.0:8081` | Ops listen address. |
 | `MAX_BODY_BYTES` | no | `16384` | Request body cap. |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | no | `0` / `20` | Per-IP limit; `0` disables. |
 | `LOG_LEVEL` | no | `info` | zerolog level. |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | no | — | In-process TLS; omit to terminate at the ingress. |
+| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | no | — | Postgres challenge store (enables multiple replicas). See [deployment](#deployment). |
 
 ## Signing keys
 
@@ -176,27 +188,28 @@ Generate an RSA key (2048-bit minimum):
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing.pem
 ```
 
-Store its PEM contents in `SIGNING_KEY_1`. The `kid` is derived deterministically
-as the RFC 7638 JWK thumbprint of the public key.
+Store its PEM contents in `SIWE_SIGNING_KEY_1`. The `kid` is derived
+deterministically as the RFC 7638 JWK thumbprint of the public key.
 
 ### Rotation (zero-downtime overlap)
 
-1. Add the new key as `SIGNING_KEY_2` and deploy. The JWKS now publishes both;
-   the new key is not yet signing.
+1. Add the new key as `SIWE_SIGNING_KEY_2` and deploy. The JWKS now publishes
+   both; the new key is not yet signing.
 2. After validators refresh their JWKS cache, promote the new key to
-   `SIGNING_KEY_1` (and demote the old to `SIGNING_KEY_2`) and deploy. New tokens
-   are signed by the new key; the old key still verifies outstanding tokens.
+   `SIWE_SIGNING_KEY_1` (and demote the old to `SIWE_SIGNING_KEY_2`) and deploy.
+   New tokens are signed by the new key; the old key still verifies outstanding
+   tokens.
 3. After `TOKEN_TTL` elapses (no tokens from the old key remain valid), drop the
    old key and deploy.
 
-The same `SIGNING_KEY_*` convention and rotation procedure apply to
-token-exchange-api, which carries its own independent key.
+The same convention and rotation procedure apply to the `/permissions` surface
+under `PERMISSIONS_SIGNING_KEY_*`, which carries its own independent key.
 
 ---
 
-# token-exchange-api
+# /permissions — token exchange
 
-Exchanges a dauth address-control token for a permission token scoped to a DIMO
+Exchanges a `/siwe` address-control token for a permission token scoped to a DIMO
 asset, after validating on-chain/SACD access. It serves both an HTTP API and a
 gRPC `TokenExchangeService`, and publishes its own JWKS/discovery (taking over
 the endpoints DEX used to serve for the roles-rights issuer).
@@ -204,9 +217,9 @@ the endpoints DEX used to serve for the roles-rights issuer).
 ## Exchange flow
 
 ```
-caller                                  token-exchange-api
-  │ POST /v1/tokens/exchange               │
-  │   Authorization: Bearer <dauth token>  │  verify dauth token signature (JWKS),
+caller                                  /permissions
+  │ POST /permissions/tokens/exchange      │
+  │   Authorization: Bearer <siwe token>   │  verify sign-in token signature (JWKS),
   │   { asset, permissions, cloudEvents }  │  require registered dev license,
   │ ──────────────────────────────────────▶  read ethereum_address from the token,
   │                                        │  check SACD/on-chain access for the asset,
@@ -214,14 +227,16 @@ caller                                  token-exchange-api
   │   { token }                            │
 ```
 
-The inbound token must be a valid dauth token (`JWT_KEY_SET_URL` points at
-dauth's `/keys`), signature-checked, whose `ethereum_address` belongs to an
-address registered as a developer license in identity-api. Authorization (the
-SACD/on-chain grantee check) reads that same `ethereum_address` claim.
+The inbound token must be a valid sign-in token, signature-checked, whose
+`ethereum_address` belongs to an address registered as a developer license in
+identity-api. Because both surfaces run in one process, the exchange validates
+that token against the `/siwe` keyset **in memory** — there is no HTTP fetch of
+its own `/siwe/keys` (which wouldn't be listening yet at startup). Authorization
+(the SACD/on-chain grantee check) reads that same `ethereum_address` claim.
 
 ## API
 
-### `POST /v1/tokens/exchange`
+### `POST /permissions/tokens/exchange`
 
 Requires `Authorization: Bearer <dauth token>`. Request:
 
@@ -247,18 +262,19 @@ alongside the standard `iss` / `sub` / `aud` / `exp` / `nbf` / `iat` / `jti`.
 
 ### Other HTTP endpoints
 
-- `GET /` — health check (`{"data":"Server is up and running"}`).
-- `GET /v1/swagger/` — interactive OpenAPI docs.
-- `GET /keys` (alias `GET /.well-known/jwks.json`) — JWKS for the permission-token
-  signing key.
-- `GET /.well-known/openid-configuration` — OIDC discovery metadata.
+- `GET /` — health check (`{"data":"Server is up and running"}`), served at the
+  process root (shared by both surfaces).
+- `GET /permissions/swagger/` — interactive OpenAPI docs.
+- `GET /permissions/keys` (alias `…/permissions/.well-known/jwks.json`) — JWKS for
+  the permission-token signing key.
+- `GET /permissions/.well-known/openid-configuration` — OIDC discovery metadata.
 
 ### gRPC
 
 `TokenExchangeService` is served on `GRPC_PORT` for the on-chain access-check
 client (`pkg/grpc`).
 
-### Ops server (separate port, `MON_PORT`)
+### Ops server (shared, `OPS_ADDRESS`)
 
 - `GET /ping`, `GET /ready` — health probes.
 - `GET /metrics` — Prometheus metrics.
@@ -266,14 +282,17 @@ client (`pkg/grpc`).
 
 ## Configuration (environment)
 
+These configure the `/permissions` surface (the inbound token is validated
+against the `/siwe` keyset in-process, so there is no JWKS-URL variable). HTTP and
+ops listeners are shared with the sign-in surface (`HTTP_ADDRESS`, `OPS_ADDRESS`).
+
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://auth-roles-rights.dimo.zone`. Also the host of its JWKS. |
-| `JWT_KEY_SET_URL` | yes | — | JWKS used to validate the inbound dauth token (point at dauth's `/keys`). |
+| `PERMISSIONS_ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://auth-roles-rights.dimo.zone`. |
 | `BLOCKCHAIN_NODE_URL` | yes | — | Ethereum RPC for SACD/contract reads. |
 | `IDENTITY_URL` | yes | — | identity-api GraphQL endpoint (dev-license + SACD lookups). |
 | `IPFS_BASE_URL` | yes | — | IPFS gateway for template/permission documents. |
-| `SIGNING_KEY_1`, `SIGNING_KEY_2`, … | yes | — | PEM RSA private keys (independent of dauth's). `_1` is the active signer. |
+| `PERMISSIONS_SIGNING_KEY_1`, `PERMISSIONS_SIGNING_KEY_2`, … | yes | — | PEM RSA private keys (independent of the sign-in surface's). `_1` is the active signer. |
 | `TOKEN_EXPIRATION` | no | `10m` | Permission-token lifetime. |
 | `CONTRACT_ADDRESS_SACD` | no | — | SACD contract address. |
 | `CONTRACT_ADDRESS_TEMPLATE` | no | — | Permission-template contract address. |
@@ -281,40 +300,51 @@ client (`pkg/grpc`).
 | `CONTRACT_ADDRESS_VEHICLE` | no | — | Vehicle NFT contract address. |
 | `DIMO_REGISTRY_CHAIN_ID` | no | `137` | Chain id for on-chain registry reads. |
 | `IPFS_TIMEOUT` | no | `30s` | Bounds each IPFS fetch. |
-| `PORT` | no | `8080` | HTTP listen port. |
 | `GRPC_PORT` | no | `8086` | gRPC listen port. |
-| `MON_PORT` | no | `8888` | Ops listen port. |
 | `ENABLE_PPROF` | no | `false` | Exposes `/debug/pprof/*` on the ops server. |
-| `ENVIRONMENT` | no | `local` | Deployment environment label. |
-| `SERVICE_NAME` | no | `token-exchange-api` | Service name label. |
-| `LOG_LEVEL` | no | `info` | zerolog level. |
 
 ---
 
 # Deployment
 
-- Containers: `docker build -f docker/dockerfile .` (dauth) and
-  `docker build -f docker/dockerfile.token-exchange-api .` (token-exchange-api).
-  Both are static binaries on `distroless/static`.
-- Helm: `charts/dauth/` and `charts/token-exchange-api/`, each with `values.yaml`
-  (dev) and `values-prod.yaml`. Signing keys (and dauth's `RPC_URL`) are pulled
-  via an `ExternalSecret`; each service references its own key at
-  `<ns>/dauth/signing_key_1` and `<ns>/token-exchange-api/signing_key_1`
-  respectively.
-- **Run dauth as a single replica.** Its nonce store is in-memory, so a challenge
-  must be redeemed on the pod that issued it. To scale out, back the `nonce.Store`
-  with a shared store (e.g. Redis) first. token-exchange-api is stateless and
-  scales independently.
-- token-exchange-api's `JWT_KEY_SET_URL` must point at the dauth deployment's
-  `/keys`; downstream consumers of the permission token point their JWKS URL at
-  token-exchange-api's `/keys`.
+- Container: `docker build -f docker/dockerfile .` — one static binary on
+  `distroless/static`, exposing the public HTTP port, the ops port, and the gRPC
+  port.
+- Helm: `charts/dauth/` with `values.yaml` (dev) and `values-prod.yaml`. The two
+  surfaces' signing keys (plus the RPC URLs) are pulled via one `ExternalSecret`,
+  referencing the distinct keys at `<ns>/dauth/signing_key_1` (sign-in) and
+  `<ns>/token-exchange-api/signing_key_1` (permissions).
+- **Challenge store and replicas.** By default the sign-in surface keeps issued
+  challenges in an in-memory `nonce.Store`, so a challenge must be redeemed on the
+  pod that issued it — keep `replicaCount: 1`. To scale out, enable the Postgres
+  store (`postgres.enabled` in the chart, or set `DB_HOST` + `DB_USER`/
+  `DB_PASSWORD`/`DB_NAME`): challenges become shared across pods (single-use
+  enforced by an atomic `DELETE ... RETURNING`), and you can raise the replica
+  count. The schema self-applies at startup; `migrations/` mirrors it for
+  out-of-band management.
+- Downstream consumers of the **permission** token point their JWKS URL at
+  `…/permissions/keys`; consumers validating the **sign-in** token point at
+  `…/siwe/keys`. The exchange validates the inbound sign-in token in-process, so
+  no JWKS URL needs wiring between the two surfaces.
 
 # Development
 
 ```sh
 go test ./...
 go build ./cmd/dauth
-go build ./cmd/token-exchange-api
+```
+
+The gRPC stubs in `pkg/grpc` are regenerated from `pkg/grpc/*.proto` with
+[`buf`](https://buf.build) (`buf generate`); the plugin versions are pinned via
+`go install` of `protoc-gen-go`/`protoc-gen-go-grpc` (see `buf.gen.yaml`).
+
+With a dauth instance running, `scripts/signin.sh` drives the full SIWE flow —
+it generates a throwaway key, requests a challenge, signs it with Foundry's
+`cast`, exchanges it for a token, and prints the decoded claims (requires `cast`,
+`curl`, and `jq`):
+
+```sh
+BASE_URL=http://localhost:8080 scripts/signin.sh
 ```
 
 With a dauth instance running, `scripts/signin.sh` drives the full SIWE flow —

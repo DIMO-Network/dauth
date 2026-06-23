@@ -1,13 +1,25 @@
-// dauth — DIMO authentication service. Clients sign a Sign-In With Ethereum
-// (EIP-4361) challenge with an EOA or a deployed smart account (EIP-1271); in
-// return they get a short-lived RS256 access token identifying their Ethereum
-// address. The token is verifiable offline against the JWKS and OIDC discovery
-// document this service publishes.
+// dauth — DIMO's Web3 auth service. One binary serves two surfaces on one host
+// (e.g. dauth.dimo.zone), routed by path prefix:
+//
+//   - /siwe         sign-in: a wallet signs a Sign-In With Ethereum (EIP-4361)
+//     challenge (EOA or deployed EIP-1271 smart account) and gets
+//     a short-lived RS256 token identifying its Ethereum address.
+//   - /permissions  token exchange: that sign-in token is exchanged for a
+//     permission token scoped to a DIMO asset, after an on-chain
+//     /SACD access check.
+//
+// Each surface signs with its own keyset and publishes its own JWKS + OIDC
+// discovery under its prefix (/siwe/keys, /permissions/keys); their iss claims
+// stay distinct. A gRPC TokenExchangeService runs on its own port.
 package main
 
 import (
 	"context"
+	"crypto/tls"
+	"database/sql"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,17 +27,23 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/config"
-	_ "github.com/DIMO-Network/dauth/internal/docs" // registers the generated OpenAPI spec (instance "dauth")
+	_ "github.com/DIMO-Network/dauth/internal/docs" // registers the sign-in OpenAPI spec (instance "dauth")
+	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/nonce"
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/server"
 	"github.com/DIMO-Network/dauth/internal/signer"
 	"github.com/DIMO-Network/dauth/internal/token"
+	txapp "github.com/DIMO-Network/dauth/internal/tokenexchange/app"
+	txconfig "github.com/DIMO-Network/dauth/internal/tokenexchange/config"
+	"github.com/DIMO-Network/dauth/internal/tokenexchange/middleware"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/ethclient"
+	_ "github.com/lib/pq" // database/sql driver for the Postgres challenge store
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 )
 
 // maxOutstandingChallenges bounds the in-memory nonce store. At ~400 bytes per
@@ -33,16 +51,18 @@ import (
 // under a challenge flood, where rejecting new challenges is the right answer.
 const maxOutstandingChallenges = 100_000
 
-// @title       dauth API
+// The two surfaces each have their own OpenAPI spec: the sign-in spec below
+// (instance "dauth", served at /siwe/swagger/) and the permission spec (instance
+// "swagger", served at /permissions/swagger/) whose annotations live under
+// internal/tokenexchange. Distinct instance names keep them from colliding in
+// this shared module.
+//
+// @title       dauth sign-in API
 // @version     1.0
 // @description DIMO Web3 sign-in. A client signs a Sign-In With Ethereum
 // @description (EIP-4361) challenge and receives a short-lived RS256 JWT carrying
 // @description its Ethereum address, verifiable offline against the published JWKS.
-// @BasePath    /
-//
-// The spec is generated into a dauth-specific package under the instance name
-// "dauth" so it never collides with token-exchange-api's spec (instance
-// "swagger") in this shared module. The exclude keeps tokenexchange routes out.
+// @BasePath    /siwe
 //
 //go:generate go tool swag init -g main.go -d ./cmd/dauth,./internal/server -o ./internal/docs --instanceName dauth --parseInternal
 func main() {
@@ -57,34 +77,106 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
+	permSettings, err := txconfig.Load()
+	if err != nil {
+		return fmt.Errorf("loading permission settings: %w", err)
+	}
 	if level, err := zerolog.ParseLevel(settings.LogLevel); err == nil {
 		zerolog.SetGlobalLevel(level)
 	}
+	zerolog.DefaultContextLogger = &log
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	keys, err := keyset.Load(settings.SigningKeys)
+	// --- Sign-in (/siwe) surface ---------------------------------------------
+	siweKeys, err := keyset.Load(settings.SigningKeys)
+	if err != nil {
+		return err
+	}
+	siweHandler, err := buildSIWE(ctx, settings, siweKeys, log)
 	if err != nil {
 		return err
 	}
 
+	// --- Permission (/permissions) surface -----------------------------------
+	// The exchange validates the inbound sign-in token against the /siwe keyset
+	// in-process — no HTTP fetch of our own not-yet-listening /siwe/keys.
+	siweJWKS, err := siweKeys.JWKS()
+	if err != nil {
+		return err
+	}
+	jwtAuth, err := middleware.NewJWTAuthFromJWKS(siweJWKS)
+	if err != nil {
+		return err
+	}
+	permHandler, grpcServer, err := txapp.CreateServers(log, &permSettings, settings.PublicBaseURL+"/permissions/keys", jwtAuth)
+	if err != nil {
+		return fmt.Errorf("building permission surface: %w", err)
+	}
+
+	// --- Compose one public handler ------------------------------------------
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", healthCheck)
+	mux.Handle("/siwe/", http.StripPrefix("/siwe", siweHandler))
+	mux.Handle("/permissions/", http.StripPrefix("/permissions", permHandler))
+	publicHandler := httpmw.Recover(log)(mux)
+
+	publicSrv := &http.Server{
+		Addr:              settings.HTTPAddr,
+		Handler:           publicHandler,
+		ReadHeaderTimeout: server.DefaultTimeout,
+	}
+	useTLS := settings.TLSCertFile != ""
+	if useTLS {
+		cert, err := loadTLS(settings.TLSCertFile, settings.TLSKeyFile)
+		if err != nil {
+			return err
+		}
+		publicSrv.TLSConfig = cert
+	}
+
+	opsSrv := server.NewOpsServer(server.OpsConfig{Addr: settings.OpsAddr, EnablePprof: permSettings.EnablePprof})
+
+	group, gctx := errgroup.WithContext(ctx)
+	group.Go(func() error { return serveHTTP(gctx, publicSrv, useTLS, log) })
+	group.Go(func() error { return serveHTTP(gctx, opsSrv, false, log) })
+	group.Go(func() error { return serveGRPC(gctx, grpcServer, fmt.Sprintf(":%d", permSettings.GRPCPort), log) })
+
+	log.Info().
+		Str("http", settings.HTTPAddr).Str("ops", settings.OpsAddr).Int("grpc", permSettings.GRPCPort).
+		Str("public_base_url", settings.PublicBaseURL).
+		Str("siwe_issuer", settings.Issuer).Str("siwe_active_kid", siweKeys.ActiveKID()).
+		Str("permissions_issuer", permSettings.Issuer).
+		Msg("dauth started")
+	return group.Wait()
+}
+
+// buildSIWE constructs the sign-in surface handler from an already-loaded
+// keyset.
+func buildSIWE(ctx context.Context, settings config.Settings, keys *keyset.KeySet, log zerolog.Logger) (http.Handler, error) {
 	// EIP-1271 (smart-account) verification needs an RPC backend. Without one
 	// the service still verifies EOA signatures.
 	var backend bind.ContractBackend
 	if settings.RPCURL != "" {
 		client, err := ethclient.Dial(settings.RPCURL)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		defer client.Close()
+		// The client lives for the process; release it on shutdown.
+		go func() { <-ctx.Done(); client.Close() }()
 		backend = client
 	} else {
 		log.Warn().Msg("RPC_URL not set; smart-account (EIP-1271) sign-in is disabled")
 	}
 
+	store, err := newStore(ctx, settings, log)
+	if err != nil {
+		return nil, err
+	}
+
 	handlers := &server.Handlers{
-		Store:    nonce.NewMemory(ctx, maxOutstandingChallenges),
+		Store:    store,
 		Verifier: signer.New(backend, log),
 		Issuer: token.NewIssuer(token.Config{
 			Keys:     keys,
@@ -93,7 +185,7 @@ func run(log zerolog.Logger) error {
 			TTL:      settings.TokenTTL,
 		}),
 		Domain:       settings.Domain,
-		URI:          settings.Issuer,
+		URI:          settings.PublicBaseURL,
 		Statement:    settings.Statement,
 		ChainID:      settings.ChainID,
 		ChallengeTTL: settings.ChallengeTTL,
@@ -102,39 +194,73 @@ func run(log zerolog.Logger) error {
 
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
 		Issuer:          settings.Issuer,
-		JWKSURI:         settings.Issuer + "/keys",
+		JWKSURI:         settings.PublicBaseURL + "/siwe/keys",
 		Keys:            keys,
 		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "ethereum_address"},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	authSrv, err := server.NewAuthServer(server.AuthConfig{
-		Addr:           settings.AuthAddr,
+	handler := server.NewSIWEHandler(server.SIWEConfig{
 		Handlers:       handlers,
 		WellKnown:      wellKnown,
 		MaxBodyBytes:   settings.MaxBodyBytes,
 		RateLimitRPS:   settings.RateLimitRPS,
 		RateLimitBurst: settings.RateLimitBurst,
-		TLSCertFile:    settings.TLSCertFile,
-		TLSKeyFile:     settings.TLSKeyFile,
-		Logger:         log,
 	})
+	return handler, nil
+}
+
+func healthCheck(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"data":"Server is up and running"}`))
+}
+
+// loadTLS builds a TLS config for in-process termination. The usual deployment
+// terminates TLS at the ingress and leaves cert/key unset.
+func loadTLS(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("loading TLS key pair: %w", err)
 	}
-	opsSrv := server.NewOpsServer(server.OpsConfig{Addr: settings.OpsAddr})
-	useTLS := settings.TLSCertFile != ""
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, nil
+}
 
-	group, gctx := errgroup.WithContext(ctx)
-	group.Go(func() error { return serveHTTP(gctx, authSrv, useTLS, log) })
-	group.Go(func() error { return serveHTTP(gctx, opsSrv, false, log) })
+// newStore builds the challenge store. With a Postgres DSN configured it
+// returns a shared, replica-safe store (and opens a connection pool closed when
+// ctx is cancelled); otherwise it returns the in-memory store, which requires a
+// single replica.
+func newStore(ctx context.Context, settings config.Settings, log zerolog.Logger) (nonce.Store, error) {
+	if !settings.UsePostgres() {
+		log.Warn().Msg("DB_HOST not set; using in-memory challenge store (dauth must run a single replica)")
+		return nonce.NewMemory(ctx, maxOutstandingChallenges), nil
+	}
 
-	log.Info().Str("auth", settings.AuthAddr).Str("ops", settings.OpsAddr).
-		Str("issuer", settings.Issuer).Str("active_kid", keys.ActiveKID()).
-		Bool("eip1271", backend != nil).Msg("dauth started")
-	return group.Wait()
+	// withSearchPath=false: the table lives in the default (public) schema.
+	sqlDB, err := sql.Open("postgres", settings.DB.BuildConnectionString(false))
+	if err != nil {
+		return nil, fmt.Errorf("opening challenge database: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(settings.DB.MaxOpenConnections)
+	sqlDB.SetMaxIdleConns(settings.DB.MaxIdleConnections)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("connecting to challenge database %s:%s: %w", settings.DB.Host, settings.DB.Port, err)
+	}
+	// The pool lives for the process; release it on shutdown.
+	go func() {
+		<-ctx.Done()
+		sqlDB.Close()
+	}()
+
+	store, err := nonce.NewPostgres(ctx, sqlDB, log)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Str("db_host", settings.DB.Host).Str("db_name", settings.DB.Name).
+		Msg("using Postgres challenge store")
+	return store, nil
 }
 
 // serveHTTP runs srv until ctx cancels, then shuts it down gracefully.
@@ -162,6 +288,29 @@ func serveHTTP(ctx context.Context, srv *http.Server, useTLS bool, log zerolog.L
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Warn().Err(err).Str("addr", srv.Addr).Msg("graceful shutdown failed")
 		}
+		return nil
+	}
+}
+
+// serveGRPC runs the gRPC server until ctx cancels, then stops it gracefully.
+func serveGRPC(ctx context.Context, srv *grpc.Server, addr string, _ zerolog.Logger) error {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("grpc listen on %s: %w", addr, err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(lis); err != nil {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		srv.GracefulStop()
 		return nil
 	}
 }

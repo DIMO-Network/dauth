@@ -1,4 +1,4 @@
-basePath: /
+basePath: /siwe
 definitions:
   server.challengeRequest:
     properties:
@@ -54,10 +54,10 @@ info:
     DIMO Web3 sign-in. A client signs a Sign-In With Ethereum
     (EIP-4361) challenge and receives a short-lived RS256 JWT carrying
     its Ethereum address, verifiable offline against the published JWKS.
-  title: dauth API
+  title: dauth sign-in API
   version: "1.0"
 paths:
-  /auth/challenge:
+  /challenge:
     post:
       consumes:
       - application/json
@@ -98,7 +98,7 @@ paths:
       summary: Request a SIWE challenge
       tags:
       - auth
-  /auth/token:
+  /token:
     post:
       consumes:
       - application/json

@@ -19,19 +19,15 @@ type Settings struct {
 	LogLevel    string
 	ServiceName string
 
-	Port        int
-	MonPort     int
 	GRPCPort    int
 	EnablePprof bool
 
 	// Issuer is the iss claim stamped on minted permission tokens (e.g.
-	// https://auth-roles-rights.dimo.zone), and identifies the JWKS this service
-	// publishes. TokenExpiration is the permission-token lifetime.
+	// https://auth-roles-rights.dimo.zone). It is namespaced (PERMISSIONS_ISSUER)
+	// because the merged binary's sign-in surface has its own distinct issuer.
+	// TokenExpiration is the permission-token lifetime.
 	Issuer          string
 	TokenExpiration string
-
-	// JWKKeySetURL is the JWKS used to validate the inbound dauth token.
-	JWKKeySetURL string
 
 	BlockchainNodeURL           string
 	ContractAddressSacd         common.Address
@@ -52,9 +48,8 @@ func Load() (Settings, error) {
 		LogLevel:                    env("LOG_LEVEL", "info"),
 		ServiceName:                 env("SERVICE_NAME", "token-exchange-api"),
 		EnablePprof:                 os.Getenv("ENABLE_PPROF") == "true",
-		Issuer:                      os.Getenv("ISSUER"),
+		Issuer:                      os.Getenv("PERMISSIONS_ISSUER"),
 		TokenExpiration:             env("TOKEN_EXPIRATION", "10m"),
-		JWKKeySetURL:                os.Getenv("JWT_KEY_SET_URL"),
 		BlockchainNodeURL:           os.Getenv("BLOCKCHAIN_NODE_URL"),
 		ContractAddressSacd:         common.HexToAddress(os.Getenv("CONTRACT_ADDRESS_SACD")),
 		ContractAddressTemplate:     common.HexToAddress(os.Getenv("CONTRACT_ADDRESS_TEMPLATE")),
@@ -66,12 +61,6 @@ func Load() (Settings, error) {
 	}
 
 	var err error
-	if s.Port, err = envInt("PORT", 8080); err != nil {
-		return s, err
-	}
-	if s.MonPort, err = envInt("MON_PORT", 8888); err != nil {
-		return s, err
-	}
 	if s.GRPCPort, err = envInt("GRPC_PORT", 8086); err != nil {
 		return s, err
 	}
@@ -90,22 +79,21 @@ func Load() (Settings, error) {
 // required lists the env values that must be set for the service to start.
 func required(s Settings) map[string]string {
 	return map[string]string{
-		"ISSUER":              s.Issuer,
-		"JWT_KEY_SET_URL":     s.JWKKeySetURL,
+		"PERMISSIONS_ISSUER":  s.Issuer,
 		"BLOCKCHAIN_NODE_URL": s.BlockchainNodeURL,
 		"IDENTITY_URL":        s.IdentityURL,
 		"IPFS_BASE_URL":       s.IPFSBaseURL,
 	}
 }
 
-// SigningKeys reads the service's RSA signing keys from the environment as
-// SIGNING_KEY_1, SIGNING_KEY_2, ... in priority order (the first is the active
-// signer; the rest stay in the JWKS for rotation overlap). token-exchange's
-// signing key is independent of dauth's.
+// SigningKeys reads the permission surface's RSA signing keys from the
+// environment as PERMISSIONS_SIGNING_KEY_1, PERMISSIONS_SIGNING_KEY_2, ... in
+// priority order (the first is the active signer; the rest stay in the JWKS for
+// rotation overlap). These keys are independent of the sign-in surface's.
 func SigningKeys() []string {
 	var out []string
 	for i := 1; ; i++ {
-		v := os.Getenv("SIGNING_KEY_" + strconv.Itoa(i))
+		v := os.Getenv("PERMISSIONS_SIGNING_KEY_" + strconv.Itoa(i))
 		if v == "" {
 			break
 		}

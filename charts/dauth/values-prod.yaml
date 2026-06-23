@@ -1,9 +1,11 @@
 env:
   ENVIRONMENT: prod
   LOG_LEVEL: info
-  AUTH_ADDRESS: "0.0.0.0:8080"
+  HTTP_ADDRESS: "0.0.0.0:8080"
   OPS_ADDRESS: "0.0.0.0:8081"
-  ISSUER: https://auth.dimo.zone
+  PUBLIC_BASE_URL: https://dauth.dimo.zone
+  # --- sign-in surface (/siwe) ---
+  SIWE_ISSUER: https://auth.dimo.zone
   JWT_AUDIENCE: dimo
   SIWE_STATEMENT: "Sign in to DIMO."
   CHAIN_ID: "137"
@@ -12,6 +14,31 @@ env:
   ALLOWABLE_TIME_SKEW: 5m
   RATE_LIMIT_RPS: "50"
   RATE_LIMIT_BURST: "100"
+  # --- token-exchange surface (/permissions) ---
+  PERMISSIONS_ISSUER: https://auth-roles-rights.dimo.zone
+  TOKEN_EXPIRATION: 10m
+  GRPC_PORT: "8086"
+  ENABLE_PPROF: "false"
+  USERS_API_GRPC_ADDRESS: users-api-prod:8086
+  CONTRACT_ADDRESS_SACD: "0x3c152B5d96769661008Ff404224d6530FCAC766d"
+  CONTRACT_ADDRESS_TEMPLATE: "0xbfc07085736426295f60baa15dc70743e98fe612"
+  CONTRACT_ADDRESS_MANUFACTURER: "0x3b07e2A2ABdd0A9B8F7878bdE6487c502164B9dd"
+  CONTRACT_ADDRESS_VEHICLE: "0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF"
+  IDENTITY_URL: http://identity-api-prod:8080/query
+  IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
+  IPFS_TIMEOUT: 30s
+  DIMO_REGISTRY_CHAIN_ID: "137"
+
+# Postgres-backed challenge store. When enabled, raise replicaCount above 1 and
+# provision the dauth/db_user + dauth/db_password secrets in AWS Secrets Manager.
+postgres:
+  enabled: false
+  host: ''
+  port: '5432'
+  name: dauth
+  sslMode: require
+  maxOpenConnections: '10'
+  maxIdleConnections: '5'
 
 resources:
   limits:
@@ -28,12 +55,12 @@ ingress:
     nginx.ingress.kubernetes.io/backend-protocol: HTTP
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
   hosts:
-    - host: auth.dimo.zone
+    - host: dauth.dimo.zone
       paths:
         - path: /
           pathType: Prefix
           port: 8080
   tls:
     - hosts:
-        - auth.dimo.zone
+        - dauth.dimo.zone
       secretName: dauth-tls

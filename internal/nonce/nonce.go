@@ -7,6 +7,7 @@
 package nonce
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -26,14 +27,16 @@ type Challenge struct {
 	ExpiresAt time.Time      // absolute expiry
 }
 
-// Store records and atomically consumes challenges, keyed by nonce.
+// Store records and atomically consumes challenges, keyed by nonce. The two
+// methods take a context so a database-backed store (see Postgres) can bind its
+// work to the request's lifetime; the in-memory store ignores it.
 type Store interface {
 	// Put records ch under the given nonce.
-	Put(nonce string, ch Challenge) error
+	Put(ctx context.Context, nonce string, ch Challenge) error
 	// Consume removes and returns the challenge for nonce. It returns
 	// ErrNotFound if absent or expired. Consuming is single-use: a second
 	// call for the same nonce returns ErrNotFound.
-	Consume(nonce string) (Challenge, error)
+	Consume(ctx context.Context, nonce string) (Challenge, error)
 }
 
 // New returns a fresh, cryptographically random nonce (32 bytes, hex-encoded).
