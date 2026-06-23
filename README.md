@@ -96,7 +96,7 @@ The chain is fixed by the `CHAIN_ID` config. Response:
 The wallet must `personal_sign` the exact `challenge` string; the client returns
 the `nonce` from step 1 to identify it. Response:
 ```json
-{ "token": "eyJ…", "token_type": "Bearer", "expires_in": 600 }
+{ "token": "eyJ…", "token_type": "Bearer", "expires_in": 3600 }
 ```
 
 Errors use OAuth-style codes: `{ "error": "invalid_grant", "error_description": "…" }`.
@@ -105,9 +105,9 @@ rate limit.
 
 ### Validation surface
 
-- `GET /.well-known/openid-configuration` — OIDC discovery metadata.
-- `GET /keys` (alias `GET /.well-known/jwks.json`) — JWKS (RFC 7517).
-- `GET /swagger/` — interactive OpenAPI docs for the sign-in endpoints.
+- `GET /siwe/.well-known/openid-configuration` — OIDC discovery metadata.
+- `GET /siwe/keys` (alias `GET /siwe/.well-known/jwks.json`) — JWKS (RFC 7517).
+- `GET /siwe/swagger/` — interactive OpenAPI docs for the sign-in endpoints.
 
 ### Ops server (separate port)
 
