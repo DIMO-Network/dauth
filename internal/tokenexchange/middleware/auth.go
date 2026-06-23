@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,19 +15,26 @@ type ctxKey string
 
 const tokenCtxKey ctxKey = "token"
 
-// NewJWTAuth returns middleware that validates the Bearer token's RS256
-// signature against the JWKS at jwksURL and stores the parsed token in the
-// request context. Like the Fiber jwtware it replaces, it is signature-only:
-// it does not enforce iss or aud (downstream validators do that). After cutover
-// jwksURL points at dauth's /keys.
-func NewJWTAuth(jwksURL string) (func(http.Handler) http.Handler, error) {
-	jwks, err := keyfunc.NewDefault([]string{jwksURL})
+// NewJWTAuthFromJWKS returns middleware that validates the Bearer token's RS256
+// signature against a static JWKS supplied in memory, and stores the parsed
+// token in the request context. Like the Fiber jwtware it replaces, it is
+// signature-only: it does not enforce iss or aud (downstream validators do
+// that). The merged binary builds it from the /siwe keyset directly, avoiding a
+// self-referential HTTP fetch of its own /siwe/keys at startup (the listener
+// isn't up yet).
+func NewJWTAuthFromJWKS(jwksJSON []byte) (func(http.Handler) http.Handler, error) {
+	jwks, err := keyfunc.NewJWKSetJSON(json.RawMessage(jwksJSON))
 	if err != nil {
-		return nil, fmt.Errorf("failed to build keyfunc from %q: %w", jwksURL, err)
+		return nil, fmt.Errorf("failed to build keyfunc from in-memory JWKS: %w", err)
 	}
-	parser := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}))
+	return authMiddleware(jwks), nil
+}
 
-	mw := func(next http.Handler) http.Handler {
+// authMiddleware builds the signature-only Bearer-token middleware around a
+// resolved keyfunc.
+func authMiddleware(jwks keyfunc.Keyfunc) func(http.Handler) http.Handler {
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}))
+	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenStr, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 			if !ok {
@@ -41,16 +49,15 @@ func NewJWTAuth(jwksURL string) (func(http.Handler) http.Handler, error) {
 			next.ServeHTTP(w, r.WithContext(WithToken(r.Context(), token)))
 		})
 	}
-	return mw, nil
 }
 
-// TokenFromContext returns the validated JWT stored by NewJWTAuth.
+// TokenFromContext returns the validated JWT stored by NewJWTAuthFromJWKS.
 func TokenFromContext(ctx context.Context) (*jwt.Token, bool) {
 	t, ok := ctx.Value(tokenCtxKey).(*jwt.Token)
 	return t, ok
 }
 
-// WithToken stores a validated JWT in ctx. NewJWTAuth uses it after verifying a
+// WithToken stores a validated JWT in ctx. NewJWTAuthFromJWKS uses it after verifying a
 // token; it is also exported so tests can inject a token without a real JWKS.
 func WithToken(ctx context.Context, token *jwt.Token) context.Context {
 	return context.WithValue(ctx, tokenCtxKey, token)

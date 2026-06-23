@@ -1,56 +1,41 @@
-// Package server wires dauth's HTTP surface: the public sign-in + JWKS server
-// and the ops server (probes and Prometheus metrics). It follows din's
-// conventions — standard net/http, explicit middleware composition, and
-// constructors that return *http.Server for the caller's errgroup to run.
+// Package server wires the sign-in (/siwe) HTTP surface and the ops server
+// (probes and Prometheus metrics). It follows din's conventions — standard
+// net/http and explicit middleware composition. The sign-in handler is returned
+// as a bare http.Handler with prefix-relative routes; the merged binary mounts
+// it under /siwe and applies the panic recoverer once across both surfaces.
 package server
 
 import (
-	"crypto/tls"
-	"fmt"
 	"net/http"
+	nethttppprof "net/http/pprof"
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/rs/zerolog"
 	httpSwagger "github.com/swaggo/http-swagger/v2"
 )
 
 const (
-	DefaultAuthAddr     = ":8080"
 	DefaultOpsAddr      = ":8081"
 	DefaultTimeout      = 10 * time.Second
 	DefaultMaxBodyBytes = 16 << 10 // 16 KiB
 )
 
-// AuthConfig configures the public sign-in server.
-type AuthConfig struct {
-	Addr           string
+// SIWEConfig configures the sign-in surface.
+type SIWEConfig struct {
 	Handlers       *Handlers
 	WellKnown      *oidc.WellKnown
 	MaxBodyBytes   int64
 	RateLimitRPS   float64
 	RateLimitBurst int
-	// TLSCertFile/TLSKeyFile enable in-process TLS. Leave empty to terminate
-	// TLS at the ingress (the default deployment).
-	TLSCertFile string
-	TLSKeyFile  string
-	Timeout     time.Duration
-	Logger      zerolog.Logger
 }
 
-// NewAuthServer builds the public server. The two POST routes are rate-limited
-// and body-capped; the read-only discovery and JWKS routes are exempt so token
-// validators polling the JWKS are never throttled. A panic recoverer wraps
-// everything.
-func NewAuthServer(cfg AuthConfig) (*http.Server, error) {
-	if cfg.Addr == "" {
-		cfg.Addr = DefaultAuthAddr
-	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = DefaultTimeout
-	}
+// NewSIWEHandler builds the sign-in surface as an http.Handler with routes
+// relative to its mount point (/siwe). The two POST routes are rate-limited and
+// body-capped; the read-only discovery and JWKS routes are exempt so token
+// validators polling the JWKS are never throttled.
+func NewSIWEHandler(cfg SIWEConfig) http.Handler {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = DefaultMaxBodyBytes
 	}
@@ -63,46 +48,27 @@ func NewAuthServer(cfg AuthConfig) (*http.Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /auth/challenge", guard(cfg.Handlers.Challenge()))
-	mux.Handle("POST /auth/token", guard(cfg.Handlers.Token()))
+	mux.Handle("POST /challenge", guard(cfg.Handlers.Challenge()))
+	mux.Handle("POST /token", guard(cfg.Handlers.Token()))
 	mux.Handle("GET /.well-known/openid-configuration", cfg.WellKnown.Discovery())
 	mux.Handle("GET /keys", cfg.WellKnown.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", cfg.WellKnown.JWKS())
 
-	// Interactive OpenAPI docs. Served under dauth's own spec instance ("dauth")
-	// so it never collides with token-exchange-api's spec in this shared module.
+	// Interactive OpenAPI docs under dauth's own spec instance ("dauth"), so it
+	// never collides with the permission surface's spec in this shared module.
+	// Mounted under /siwe by the merged binary, so this serves /siwe/swagger/.
 	mux.Handle("GET /swagger/", httpSwagger.Handler(httpSwagger.InstanceName("dauth")))
-
-	handler := httpmw.Recover(cfg.Logger)(mux)
-
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           handler,
-		ReadTimeout:       cfg.Timeout,
-		ReadHeaderTimeout: cfg.Timeout,
-		WriteTimeout:      cfg.Timeout,
-	}
-
-	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("loading TLS key pair: %w", err)
-		}
-		srv.TLSConfig = &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-		}
-	}
-	return srv, nil
+	return mux
 }
 
 // OpsConfig configures the operational server.
 type OpsConfig struct {
-	Addr string
+	Addr        string
+	EnablePprof bool
 }
 
 // NewOpsServer builds the operational server exposing /ping, /ready, and
-// Prometheus /metrics.
+// Prometheus /metrics, plus net/http/pprof when EnablePprof is set.
 func NewOpsServer(cfg OpsConfig) *http.Server {
 	if cfg.Addr == "" {
 		cfg.Addr = DefaultOpsAddr
@@ -115,6 +81,13 @@ func NewOpsServer(cfg OpsConfig) *http.Server {
 	mux.HandleFunc("/ping", ok)
 	mux.HandleFunc("/ready", ok)
 	mux.Handle("/metrics", promhttp.Handler())
+	if cfg.EnablePprof {
+		mux.HandleFunc("/debug/pprof/", nethttppprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", nethttppprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", nethttppprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", nethttppprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", nethttppprof.Trace)
+	}
 
 	return &http.Server{
 		Addr:              cfg.Addr,

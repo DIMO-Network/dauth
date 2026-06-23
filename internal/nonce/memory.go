@@ -54,8 +54,9 @@ func (m *Memory) shard(id string) *shard {
 }
 
 // Put records ch under id, rejecting new entries once the per-shard capacity is
-// reached (after first dropping any expired entries in that shard).
-func (m *Memory) Put(id string, ch Challenge) error {
+// reached (after first dropping any expired entries in that shard). The context
+// is unused: the in-memory store does no cancellable I/O.
+func (m *Memory) Put(_ context.Context, id string, ch Challenge) error {
 	s := m.shard(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,7 +76,7 @@ func (m *Memory) Put(id string, ch Challenge) error {
 }
 
 // Consume atomically removes and returns the challenge for id.
-func (m *Memory) Consume(id string) (Challenge, error) {
+func (m *Memory) Consume(_ context.Context, id string) (Challenge, error) {
 	s := m.shard(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()

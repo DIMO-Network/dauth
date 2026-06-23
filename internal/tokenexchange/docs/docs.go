@@ -163,7 +163,7 @@ const docTemplate = `{
 var SwaggerInfo = &swag.Spec{
 	Version:          "1.0",
 	Host:             "",
-	BasePath:         "/v1",
+	BasePath:         "/permissions",
 	Schemes:          []string{},
 	Title:            "DIMO Token Exchange API",
 	Description:      "",

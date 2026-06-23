@@ -81,7 +81,7 @@ type errorResponse struct {
 // @Failure     429 {object} server.errorResponse "rate limited"
 // @Failure     500 {object} server.errorResponse "server_error"
 // @Failure     503 {object} server.errorResponse "challenge store unavailable"
-// @Router      /auth/challenge [post]
+// @Router      /challenge [post]
 func (h *Handlers) Challenge() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req challengeRequest
@@ -121,7 +121,7 @@ func (h *Handlers) Challenge() http.Handler {
 		}.String()
 
 		// The store is keyed by the nonce, which the client returns to /token.
-		if err := h.Store.Put(id, nonce.Challenge{
+		if err := h.Store.Put(r.Context(), id, nonce.Challenge{
 			Message:   msg,
 			Address:   addr,
 			ExpiresAt: expiresAt,
@@ -152,7 +152,7 @@ func (h *Handlers) Challenge() http.Handler {
 // @Failure     401 {object} server.errorResponse "invalid_grant"
 // @Failure     500 {object} server.errorResponse "server_error"
 // @Failure     503 {object} server.errorResponse "verification backend unavailable"
-// @Router      /auth/token [post]
+// @Router      /token [post]
 func (h *Handlers) Token() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req tokenRequest
@@ -173,7 +173,7 @@ func (h *Handlers) Token() http.Handler {
 		// Look the challenge up by nonce and consume it. Single-use: a replayed
 		// nonce, an expired challenge, or an unknown nonce all surface
 		// identically as invalid_grant.
-		ch, err := h.Store.Consume(req.Nonce)
+		ch, err := h.Store.Consume(r.Context(), req.Nonce)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid_grant", "challenge not found, already used, or expired")
 			return

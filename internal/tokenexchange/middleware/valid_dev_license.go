@@ -25,7 +25,7 @@ type IdentityService interface {
 
 // NewDevLicenseValidator confirms the caller holds a valid developer license.
 // The caller's address comes from the ethereum_address claim on the inbound
-// dauth token (validated upstream by NewJWTAuth); it must resolve to a
+// dauth token (validated upstream by NewJWTAuthFromJWKS); it must resolve to a
 // registered developer license, and it becomes the response subject (and the
 // grantee for the access check). The DIMO mobile app carries a developer
 // license like any other integrator, so there is no special passthrough.

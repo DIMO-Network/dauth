@@ -71,11 +71,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: issuer, JWKSURI: issuer + "/keys", Keys: ks})
 	require.NoError(t, err)
-	srv, err := NewAuthServer(AuthConfig{Handlers: h, WellKnown: wk, Logger: zerolog.Nop()})
-	require.NoError(t, err)
+	handler := NewSIWEHandler(SIWEConfig{Handlers: h, WellKnown: wk})
 
 	return &testEnv{
-		ts:       httptest.NewServer(srv.Handler),
+		ts:       httptest.NewServer(handler),
 		handlers: h,
 		priv:     wallet,
 		addr:     addr,
@@ -98,7 +97,7 @@ func (e *testEnv) post(t *testing.T, path string, body any) (*http.Response, map
 
 func (e *testEnv) challenge(t *testing.T) (challenge, nonce string) {
 	t.Helper()
-	resp, body := e.post(t, "/auth/challenge", map[string]any{"address": e.addr.Hex()})
+	resp, body := e.post(t, "/challenge", map[string]any{"address": e.addr.Hex()})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	return body["challenge"].(string), body["nonce"].(string)
 }
@@ -118,7 +117,7 @@ func TestFullFlow_Success(t *testing.T) {
 	assert.Contains(t, challenge, e.addr.Hex())
 	assert.Contains(t, challenge, "Nonce: "+nonce)
 
-	resp, body := e.post(t, "/auth/token", map[string]any{"nonce": nonce, "signature": e.sign(t, challenge)})
+	resp, body := e.post(t, "/token", map[string]any{"nonce": nonce, "signature": e.sign(t, challenge)})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	tokenStr, _ := body["token"].(string)
@@ -145,11 +144,11 @@ func TestFullFlow_ReusedNonceRejected(t *testing.T) {
 	challenge, nonce := e.challenge(t)
 	sig := e.sign(t, challenge)
 
-	resp, _ := e.post(t, "/auth/token", map[string]any{"nonce": nonce, "signature": sig})
+	resp, _ := e.post(t, "/token", map[string]any{"nonce": nonce, "signature": sig})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Replaying the same nonce + signature must fail: the nonce is consumed.
-	resp, body := e.post(t, "/auth/token", map[string]any{"nonce": nonce, "signature": sig})
+	resp, body := e.post(t, "/token", map[string]any{"nonce": nonce, "signature": sig})
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	assert.Equal(t, "invalid_grant", body["error"])
 }
@@ -160,7 +159,7 @@ func TestFullFlow_TamperedSignatureRejected(t *testing.T) {
 
 	_, nonce := e.challenge(t)
 	// Sign a different message than the stored challenge.
-	resp, body := e.post(t, "/auth/token", map[string]any{"nonce": nonce, "signature": e.sign(t, "not the challenge")})
+	resp, body := e.post(t, "/token", map[string]any{"nonce": nonce, "signature": e.sign(t, "not the challenge")})
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	assert.Equal(t, "invalid_grant", body["error"])
 }
@@ -168,7 +167,7 @@ func TestFullFlow_TamperedSignatureRejected(t *testing.T) {
 func TestChallenge_RejectsBadAddress(t *testing.T) {
 	e := newTestEnv(t)
 	defer e.ts.Close()
-	resp, body := e.post(t, "/auth/challenge", map[string]any{"address": "not-an-address"})
+	resp, body := e.post(t, "/challenge", map[string]any{"address": "not-an-address"})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "invalid_request", body["error"])
 }
@@ -177,7 +176,7 @@ func TestToken_BadSignatureHexRejected(t *testing.T) {
 	e := newTestEnv(t)
 	defer e.ts.Close()
 	_, nonce := e.challenge(t)
-	resp, body := e.post(t, "/auth/token", map[string]any{"nonce": nonce, "signature": "nothex"})
+	resp, body := e.post(t, "/token", map[string]any{"nonce": nonce, "signature": "nothex"})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "invalid_request", body["error"])
 }
@@ -190,7 +189,7 @@ func TestExpiredChallengeRejected(t *testing.T) {
 	e.handlers.Now = func() time.Time { return time.Now().Add(-time.Hour) }
 
 	challenge, nonce := e.challenge(t)
-	resp, body := e.post(t, "/auth/token", map[string]any{"nonce": nonce, "signature": e.sign(t, challenge)})
+	resp, body := e.post(t, "/token", map[string]any{"nonce": nonce, "signature": e.sign(t, challenge)})
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	assert.Equal(t, "invalid_grant", body["error"])
 }
@@ -198,7 +197,7 @@ func TestExpiredChallengeRejected(t *testing.T) {
 func TestWrongMethodRejected(t *testing.T) {
 	e := newTestEnv(t)
 	defer e.ts.Close()
-	resp, err := http.Get(e.ts.URL + "/auth/challenge")
+	resp, err := http.Get(e.ts.URL + "/challenge")
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
