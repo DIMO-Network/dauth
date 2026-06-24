@@ -147,7 +147,7 @@ const docTemplatedauth = `{
             "properties": {
                 "challenge": {
                     "type": "string",
-                    "example": "auth.dimo.zone wants you to sign in with your Ethereum account:..."
+                    "example": "dauth.dimo.zone wants you to sign in with your Ethereum account:..."
                 },
                 "expires_at": {
                     "type": "string",

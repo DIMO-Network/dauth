@@ -32,13 +32,14 @@ type Settings struct {
 
 	// PublicBaseURL is the externally reachable origin of the merged service
 	// (e.g. https://dauth.dimo.zone). It is the base for each surface's published
-	// jwks_uri — https://dauth.dimo.zone/siwe/keys and /permissions/keys — which
-	// is decoupled from the iss claims (those stay auth.dimo.zone and
-	// auth-roles-rights.dimo.zone). Required.
+	// jwks_uri — https://dauth.dimo.zone/siwe/keys and /permissions/keys — and,
+	// by convention, for the iss claims (https://dauth.dimo.zone/siwe and
+	// /permissions), so each surface's discovery document is self-consistent.
+	// Required.
 	PublicBaseURL string
 
 	// Token / issuer identity for the sign-in (/siwe) surface.
-	Issuer    string   // SIWE_ISSUER (e.g. https://auth.dimo.zone) — required
+	Issuer    string   // SIWE_ISSUER (e.g. https://dauth.dimo.zone/siwe) — required
 	Domain    string   // SIWE_DOMAIN host; defaults to the PublicBaseURL host
 	Audience  []string // JWT_AUDIENCE (comma-separated) — required
 	Statement string   // SIWE_STATEMENT shown in the wallet prompt
@@ -90,7 +91,7 @@ func Load() (Settings, error) {
 	}
 
 	if s.Issuer == "" {
-		return s, errors.New("SIWE_ISSUER is required (e.g. https://auth.dimo.zone)")
+		return s, errors.New("SIWE_ISSUER is required (e.g. https://dauth.dimo.zone/siwe)")
 	}
 	issuerURL, err := url.Parse(s.Issuer)
 	if err != nil || issuerURL.Scheme == "" || issuerURL.Host == "" {
