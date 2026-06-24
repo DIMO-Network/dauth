@@ -1,2 +1,5 @@
 # Signing keys (the README's openssl example writes signing.pem here)
 *.pem
+
+# Local dev artifacts (throwaway signing keys, etc.)
+.local/

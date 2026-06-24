@@ -1,0 +1,22 @@
+# Local Postgres for dauth's challenge store. scripts/run-local.sh starts this
+# automatically; `make db-up` / `make db-down` manage it directly. The host port
+# is 5433 to avoid clashing with a Postgres already listening on 5432.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dauth
+      POSTGRES_PASSWORD: dauth
+      POSTGRES_DB: dauth
+    ports:
+      - "5433:5432"
+    volumes:
+      - dauth_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dauth -d dauth"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  dauth_pgdata:

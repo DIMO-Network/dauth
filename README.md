@@ -334,6 +334,26 @@ go test ./...
 go build ./cmd/dauth
 ```
 
+## Running locally
+
+`make run` brings up Postgres (via `docker-compose.yml`, on host port 5433 to
+avoid clashing with a local Postgres on 5432), generates throwaway signing keys
+under `.local/` on first run, and starts the merged binary with sane local env:
+
+```sh
+make run                 # dauth on :8080 (ops :8081, grpc :8086)
+make signin              # in another shell — drives the full /siwe flow
+make db-down             # stop Postgres and wipe its volume
+```
+
+The **`/siwe` sign-in surface works fully offline** — EOA signing needs no
+backends (set `RPC_URL` only to test smart-account / EIP-1271 login). The
+**`/permissions` exchange boots but can't complete a real exchange** without
+identity-api, an Ethereum RPC, and IPFS; point `IDENTITY_URL`,
+`BLOCKCHAIN_NODE_URL`, and `IPFS_BASE_URL` at real (or mocked) services to
+exercise it. To run without Docker, start any Postgres and set the `DB_*` vars
+yourself (or leave `DB_HOST` unset to use the in-memory single-replica store).
+
 The gRPC stubs in `pkg/grpc` are regenerated from `pkg/grpc/*.proto` with
 [`buf`](https://buf.build) (`buf generate`); the plugin versions are pinned via
 `go install` of `protoc-gen-go`/`protoc-gen-go-grpc` (see `buf.gen.yaml`).
