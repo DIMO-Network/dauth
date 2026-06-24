@@ -13,12 +13,15 @@ stages of one flow, routed by path prefix:
    developer license and, after checking on-chain/SACD access, mints a permission
    token scoped to a DIMO asset.
 
-Both surfaces are stateless and offline-verifiable: each publishes its **own**
-JWKS and OIDC discovery document under its prefix, signs with its **own** RSA key,
-and keeps a **distinct** `iss` claim. Two separate keysets are the security
-boundary — a token of one kind never verifies against the other surface's JWKS.
-The shared host is pure transport; nothing here uses an OAuth2 authorization-code
-flow, refresh tokens, or a connector framework.
+Both surfaces issue **stateless, offline-verifiable** tokens: each publishes its
+**own** JWKS and OIDC discovery document under its prefix, signs with its **own**
+RSA key, and keeps a **distinct** `iss` claim. Two separate keysets are the
+security boundary — a token of one kind never verifies against the other
+surface's JWKS. The only server-side state is sign-in's short-lived challenge
+(nonce) store — kept in memory, or in Postgres to run multiple replicas (see
+[deployment](#deployment)); the exchange holds no state, and validating a token
+never needs a server round-trip. The shared host is pure transport; nothing here
+uses an OAuth2 authorization-code flow, refresh tokens, or a connector framework.
 
 ## Surfaces
 
