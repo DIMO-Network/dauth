@@ -44,7 +44,7 @@ type challengeRequest struct {
 }
 
 type challengeResponse struct {
-	Challenge string `json:"challenge" example:"auth.dimo.zone wants you to sign in with your Ethereum account:..."`
+	Challenge string `json:"challenge" example:"dauth.dimo.zone wants you to sign in with your Ethereum account:..."`
 	Nonce     string `json:"nonce" example:"a1b2c3..."`
 	ExpiresAt string `json:"expires_at" example:"2026-06-14T17:25:00Z"`
 }

@@ -9,7 +9,7 @@ definitions:
   server.challengeResponse:
     properties:
       challenge:
-        example: auth.dimo.zone wants you to sign in with your Ethereum account:...
+        example: dauth.dimo.zone wants you to sign in with your Ethereum account:...
         type: string
       expires_at:
         example: "2026-06-14T17:25:00Z"

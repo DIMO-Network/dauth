@@ -27,8 +27,8 @@ uses an OAuth2 authorization-code flow, refresh tokens, or a connector framework
 
 | Surface | Prefix | Issues | Default `iss` | Published at |
 |---------|--------|--------|---------------|--------------|
-| [Sign-in](#siwe--address-control-tokens) | `/siwe` | Address-control token (`ethereum_address`) | `https://auth.dimo.zone` | `…/siwe/keys` |
-| [Token exchange](#permissions--token-exchange) | `/permissions` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://auth-roles-rights.dimo.zone` | `…/permissions/keys` |
+| [Sign-in](#siwe--address-control-tokens) | `/siwe` | Address-control token (`ethereum_address`) | `https://dauth.dimo.zone/siwe` | `…/siwe/keys` |
+| [Token exchange](#permissions--token-exchange) | `/permissions` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://dauth.dimo.zone/permissions` | `…/permissions/keys` |
 
 The exchange also exposes a gRPC `TokenExchangeService` on its own port. The two
 surfaces share Go packages — `internal/keyset` (signing), `internal/oidc` (JWKS +
@@ -85,7 +85,7 @@ is stateless and offline-verifiable.
 The chain is fixed by the `CHAIN_ID` config. Response:
 ```json
 {
-  "challenge": "auth.dimo.zone wants you to sign in with your Ethereum account:\n0x6E4…A1b\n\nSign in to DIMO.\n\nURI: https://auth.dimo.zone\nVersion: 1\nChain ID: 137\nNonce: …\nIssued At: …\nExpiration Time: …",
+  "challenge": "dauth.dimo.zone wants you to sign in with your Ethereum account:\n0x6E4…A1b\n\nSign in to DIMO.\n\nURI: https://dauth.dimo.zone\nVersion: 1\nChain ID: 137\nNonce: …\nIssued At: …\nExpiration Time: …",
   "nonce": "…",
   "expires_at": "2026-06-14T17:25:00Z"
 }
@@ -138,7 +138,7 @@ Point any validator at the issuer and JWKS. For example, `din`'s attestation
 server is configured with:
 
 ```
-TOKEN_EXCHANGE_ISSUER=https://auth.dimo.zone
+TOKEN_EXCHANGE_ISSUER=https://dauth.dimo.zone/siwe
 TOKEN_EXCHANGE_KEY_SET_URL=https://dauth.dimo.zone/siwe/keys
 ```
 
@@ -164,7 +164,7 @@ section); a few process-wide variables (`PUBLIC_BASE_URL`, `HTTP_ADDRESS`,
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
 | `PUBLIC_BASE_URL` | yes | — | Externally reachable origin, e.g. `https://dauth.dimo.zone`. Base of each surface's `jwks_uri`; also the SIWE `uri` and default `SIWE_DOMAIN` host. |
-| `SIWE_ISSUER` | yes | — | Absolute URL, e.g. `https://auth.dimo.zone`. The sign-in JWT `iss`. |
+| `SIWE_ISSUER` | yes | — | Absolute URL, e.g. `https://dauth.dimo.zone/siwe`. The sign-in JWT `iss`. |
 | `JWT_AUDIENCE` | yes | — | Comma-separated `aud` value(s). |
 | `SIWE_SIGNING_KEY_1`, `SIWE_SIGNING_KEY_2`, … | yes | — | PEM RSA private keys, in order. `_1` is the active signer. |
 | `CHAIN_ID` | no | `137` | Chain the sign-in is bound to (in the SIWE message). |
@@ -291,7 +291,7 @@ ops listeners are shared with the sign-in surface (`HTTP_ADDRESS`, `OPS_ADDRESS`
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `PERMISSIONS_ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://auth-roles-rights.dimo.zone`. |
+| `PERMISSIONS_ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://dauth.dimo.zone/permissions`. |
 | `BLOCKCHAIN_NODE_URL` | yes | — | Ethereum RPC for SACD/contract reads. |
 | `IDENTITY_URL` | yes | — | identity-api GraphQL endpoint (dev-license + SACD lookups). |
 | `IPFS_BASE_URL` | yes | — | IPFS gateway for template/permission documents. |

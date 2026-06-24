@@ -27,7 +27,7 @@ env:
   HTTP_ADDRESS: 0.0.0.0:8080
   OPS_ADDRESS: 0.0.0.0:8081
   PUBLIC_BASE_URL: https://dauth.dev.dimo.zone
-  SIWE_ISSUER: https://auth.dev.dimo.zone
+  SIWE_ISSUER: https://dauth.dev.dimo.zone/siwe
   JWT_AUDIENCE: dimo
   SIWE_STATEMENT: Sign in to DIMO.
   CHAIN_ID: '80002'
@@ -36,7 +36,7 @@ env:
   ALLOWABLE_TIME_SKEW: 5m
   RATE_LIMIT_RPS: '20'
   RATE_LIMIT_BURST: '40'
-  PERMISSIONS_ISSUER: https://auth-roles-rights.dev.dimo.zone
+  PERMISSIONS_ISSUER: https://dauth.dev.dimo.zone/permissions
   TOKEN_EXPIRATION: 10m
   GRPC_PORT: '8086'
   ENABLE_PPROF: 'false'

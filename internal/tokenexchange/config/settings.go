@@ -23,7 +23,7 @@ type Settings struct {
 	EnablePprof bool
 
 	// Issuer is the iss claim stamped on minted permission tokens (e.g.
-	// https://auth-roles-rights.dimo.zone). It is namespaced (PERMISSIONS_ISSUER)
+	// https://dauth.dimo.zone/permissions). It is namespaced (PERMISSIONS_ISSUER)
 	// because the merged binary's sign-in surface has its own distinct issuer.
 	// TokenExpiration is the permission-token lifetime.
 	Issuer          string
