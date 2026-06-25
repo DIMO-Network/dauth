@@ -20,7 +20,7 @@ type Settings struct {
 	Environment string
 	LogLevel    string
 
-	// HTTP servers. One public listener serves both the /siwe and /permissions
+	// HTTP servers. One public listener serves both the /siwe and /exchange
 	// surfaces; the ops listener serves probes + Prometheus.
 	HTTPAddr       string // HTTP_ADDRESS — public server (both prefixes)
 	OpsAddr        string // OPS_ADDRESS  — probes + Prometheus
@@ -32,9 +32,9 @@ type Settings struct {
 
 	// PublicBaseURL is the externally reachable origin of the merged service
 	// (e.g. https://dauth.dimo.zone). It is the base for each surface's published
-	// jwks_uri — https://dauth.dimo.zone/siwe/keys and /permissions/keys — and,
+	// jwks_uri — https://dauth.dimo.zone/siwe/keys and /exchange/keys — and,
 	// by convention, for the iss claims (https://dauth.dimo.zone/siwe and
-	// /permissions), so each surface's discovery document is self-consistent.
+	// /exchange), so each surface's discovery document is self-consistent.
 	// Required.
 	PublicBaseURL string
 

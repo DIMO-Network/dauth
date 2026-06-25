@@ -14,8 +14,8 @@ env:
   ALLOWABLE_TIME_SKEW: 5m
   RATE_LIMIT_RPS: "50"
   RATE_LIMIT_BURST: "100"
-  # --- token-exchange surface (/permissions) ---
-  PERMISSIONS_ISSUER: https://dauth.dimo.zone/permissions
+  # --- Exchange surface (/exchange) ---
+  EXCHANGE_ISSUER: https://dauth.dimo.zone/exchange
   TOKEN_EXPIRATION: 10m
   GRPC_PORT: "8086"
   ENABLE_PPROF: "false"

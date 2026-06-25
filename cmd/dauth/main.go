@@ -4,12 +4,11 @@
 //   - /siwe         sign-in: a wallet signs a Sign-In With Ethereum (EIP-4361)
 //     challenge (EOA or deployed EIP-1271 smart account) and gets
 //     a short-lived RS256 token identifying its Ethereum address.
-//   - /permissions  token exchange: that sign-in token is exchanged for a
-//     permission token scoped to a DIMO asset, after an on-chain
-//     /SACD access check.
+//   - /exchange     swaps that sign-in token for a permission token scoped
+//     to a DIMO asset, after an on-chain SACD access check.
 //
 // Each surface signs with its own keyset and publishes its own JWKS + OIDC
-// discovery under its prefix (/siwe/keys, /permissions/keys); their iss claims
+// discovery under its prefix (/siwe/keys, /exchange/keys); their iss claims
 // stay distinct. A gRPC TokenExchangeService runs on its own port.
 package main
 
@@ -28,6 +27,9 @@ import (
 
 	"github.com/DIMO-Network/dauth/internal/config"
 	_ "github.com/DIMO-Network/dauth/internal/docs" // registers the sign-in OpenAPI spec (instance "dauth")
+	exchangeapp "github.com/DIMO-Network/dauth/internal/exchange/app"
+	exchangeconfig "github.com/DIMO-Network/dauth/internal/exchange/config"
+	"github.com/DIMO-Network/dauth/internal/exchange/middleware"
 	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/nonce"
@@ -35,9 +37,6 @@ import (
 	"github.com/DIMO-Network/dauth/internal/server"
 	"github.com/DIMO-Network/dauth/internal/signer"
 	"github.com/DIMO-Network/dauth/internal/token"
-	txapp "github.com/DIMO-Network/dauth/internal/tokenexchange/app"
-	txconfig "github.com/DIMO-Network/dauth/internal/tokenexchange/config"
-	"github.com/DIMO-Network/dauth/internal/tokenexchange/middleware"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/ethclient"
 	_ "github.com/lib/pq" // database/sql driver for the Postgres challenge store
@@ -52,9 +51,9 @@ import (
 const maxOutstandingChallenges = 100_000
 
 // The two surfaces each have their own OpenAPI spec: the sign-in spec below
-// (instance "dauth", served at /siwe/swagger/) and the permission spec (instance
-// "swagger", served at /permissions/swagger/) whose annotations live under
-// internal/tokenexchange. Distinct instance names keep them from colliding in
+// (instance "dauth", served at /siwe/swagger/) and the exchange spec (instance
+// "swagger", served at /exchange/swagger/) whose annotations live under
+// internal/exchange. Distinct instance names keep them from colliding in
 // this shared module.
 //
 // @title       dauth sign-in API
@@ -77,9 +76,9 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	permSettings, err := txconfig.Load()
+	exchangeSettings, err := exchangeconfig.Load()
 	if err != nil {
-		return fmt.Errorf("loading permission settings: %w", err)
+		return fmt.Errorf("loading exchange settings: %w", err)
 	}
 	if level, err := zerolog.ParseLevel(settings.LogLevel); err == nil {
 		zerolog.SetGlobalLevel(level)
@@ -99,7 +98,7 @@ func run(log zerolog.Logger) error {
 		return err
 	}
 
-	// --- Permission (/permissions) surface -----------------------------------
+	// --- Exchange (/exchange) surface ----------------------------------------
 	// The exchange validates the inbound sign-in token against the /siwe keyset
 	// in-process — no HTTP fetch of our own not-yet-listening /siwe/keys.
 	siweJWKS, err := siweKeys.JWKS()
@@ -110,16 +109,16 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	permHandler, grpcServer, err := txapp.CreateServers(log, &permSettings, settings.PublicBaseURL+"/permissions/keys", jwtAuth)
+	exchangeHandler, grpcServer, err := exchangeapp.CreateServers(log, &exchangeSettings, settings.PublicBaseURL+"/exchange/keys", jwtAuth)
 	if err != nil {
-		return fmt.Errorf("building permission surface: %w", err)
+		return fmt.Errorf("building exchange surface: %w", err)
 	}
 
 	// --- Compose one public handler ------------------------------------------
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", healthCheck)
 	mux.Handle("/siwe/", http.StripPrefix("/siwe", siweHandler))
-	mux.Handle("/permissions/", http.StripPrefix("/permissions", permHandler))
+	mux.Handle("/exchange/", http.StripPrefix("/exchange", exchangeHandler))
 	publicHandler := httpmw.Recover(log)(mux)
 
 	publicSrv := &http.Server{
@@ -136,18 +135,18 @@ func run(log zerolog.Logger) error {
 		publicSrv.TLSConfig = cert
 	}
 
-	opsSrv := server.NewOpsServer(server.OpsConfig{Addr: settings.OpsAddr, EnablePprof: permSettings.EnablePprof})
+	opsSrv := server.NewOpsServer(server.OpsConfig{Addr: settings.OpsAddr, EnablePprof: exchangeSettings.EnablePprof})
 
 	group, gctx := errgroup.WithContext(ctx)
 	group.Go(func() error { return serveHTTP(gctx, publicSrv, useTLS, log) })
 	group.Go(func() error { return serveHTTP(gctx, opsSrv, false, log) })
-	group.Go(func() error { return serveGRPC(gctx, grpcServer, fmt.Sprintf(":%d", permSettings.GRPCPort), log) })
+	group.Go(func() error { return serveGRPC(gctx, grpcServer, fmt.Sprintf(":%d", exchangeSettings.GRPCPort), log) })
 
 	log.Info().
-		Str("http", settings.HTTPAddr).Str("ops", settings.OpsAddr).Int("grpc", permSettings.GRPCPort).
+		Str("http", settings.HTTPAddr).Str("ops", settings.OpsAddr).Int("grpc", exchangeSettings.GRPCPort).
 		Str("public_base_url", settings.PublicBaseURL).
 		Str("siwe_issuer", settings.Issuer).Str("siwe_active_kid", siweKeys.ActiveKID()).
-		Str("permissions_issuer", permSettings.Issuer).
+		Str("exchange_issuer", exchangeSettings.Issuer).
 		Msg("dauth started")
 	return group.Wait()
 }
