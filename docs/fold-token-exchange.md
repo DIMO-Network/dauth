@@ -47,7 +47,7 @@ dauth/
   internal/token/                  # dauth's ethereum_address issuer (thin wrapper over signing core)
   internal/<signing core>/         # SHARED: sign registered+custom claims with active key, set kid/alg
   internal/nonce, siwe, server,    # dauth-specific, unchanged
-  internal/tokenexchange/          # moved in: api, app, autheval, config, contracts,
+  internal/exchange/                   # moved in: api, app, autheval, config, contracts,
                                    #   controllers, middleware, models, services, signature, docs
   pkg/tokenclaims/                 # moved in (public) -> consumers re-import from dauth path
   pkg/grpc/                        # moved in (public AccessCheck client) -> re-import

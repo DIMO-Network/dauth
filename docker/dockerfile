@@ -13,7 +13,7 @@ FROM gcr.io/distroless/static AS final
 LABEL maintainer="DIMO <hello@dimo.zone>"
 USER nonroot:nonroot
 COPY --from=build /dauth /
-# 8080 public HTTP (/siwe + /permissions), 8081 ops (probes + metrics),
+# 8080 public HTTP (/siwe + /exchange), 8081 ops (probes + metrics),
 # 8086 gRPC TokenExchangeService.
 EXPOSE 8080 8081 8086
 ENTRYPOINT ["/dauth"]

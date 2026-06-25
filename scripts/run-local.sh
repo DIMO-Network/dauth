@@ -4,7 +4,7 @@
 # On first run it generates throwaway RSA signing keys under .local/, brings up
 # Postgres via docker compose (host port 5433), and runs cmd/dauth with sane
 # local env. The /siwe sign-in flow works fully offline — drive it from another
-# shell with `make signin` (scripts/signin.sh). The /permissions exchange boots
+# shell with `make signin` (scripts/signin.sh). The /exchange exchange boots
 # but needs real identity-api / RPC / IPFS backends to complete an actual
 # exchange; point BLOCKCHAIN_NODE_URL / IDENTITY_URL / IPFS_BASE_URL at them.
 set -euo pipefail
@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 keys_dir=.local
 mkdir -p "$keys_dir"
-for name in siwe permissions; do
+for name in siwe exchange; do
   if [[ ! -f "$keys_dir/$name.pem" ]]; then
     echo "→ generating $keys_dir/$name.pem"
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$keys_dir/$name.pem" 2>/dev/null
@@ -27,10 +27,10 @@ export PUBLIC_BASE_URL=http://localhost:8080
 export SIWE_ISSUER=https://auth.local.dimo.zone
 export JWT_AUDIENCE=dimo
 export SIWE_SIGNING_KEY_1="$(cat "$keys_dir/siwe.pem")"
-export PERMISSIONS_ISSUER=https://auth-roles-rights.local.dimo.zone
-export PERMISSIONS_SIGNING_KEY_1="$(cat "$keys_dir/permissions.pem")"
+export EXCHANGE_ISSUER=https://auth-roles-rights.local.dimo.zone
+export EXCHANGE_SIGNING_KEY_1="$(cat "$keys_dir/exchange.pem")"
 
-# Backend dependencies of the /permissions exchange. The defaults are
+# Backend dependencies of the /exchange exchange. The defaults are
 # placeholders so the process boots; override to exercise a real exchange.
 export BLOCKCHAIN_NODE_URL="${BLOCKCHAIN_NODE_URL:-http://localhost:8545}"
 export IDENTITY_URL="${IDENTITY_URL:-http://localhost:3001/query}"

@@ -8,7 +8,7 @@ stages of one flow, routed by path prefix:
 1. **`/siwe`** proves *"I control this Ethereum address."* A client signs a
    [Sign-In With Ethereum](https://eips.ethereum.org/EIPS/eip-4361) (EIP-4361)
    challenge and receives a short-lived RS256 JWT carrying its address.
-2. **`/permissions`** proves *"this address may access this asset with these
+2. **`/exchange`** proves *"this address may access this asset with these
    permissions."* It takes a `/siwe` address-control token from a registered
    developer license and, after checking on-chain/SACD access, mints a permission
    token scoped to a DIMO asset.
@@ -28,13 +28,13 @@ uses an OAuth2 authorization-code flow, refresh tokens, or a connector framework
 | Surface | Prefix | Issues | Default `iss` | Published at |
 |---------|--------|--------|---------------|--------------|
 | [Sign-in](#siwe--address-control-tokens) | `/siwe` | Address-control token (`ethereum_address`) | `https://dauth.dimo.zone/siwe` | `…/siwe/keys` |
-| [Token exchange](#permissions--token-exchange) | `/permissions` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://dauth.dimo.zone/permissions` | `…/permissions/keys` |
+| [Exchange](#exchange--permission-tokens) | `/exchange` | Permission token (`asset` / `permissions` / `cloud_events`) | `https://dauth.dimo.zone/exchange` | `…/exchange/keys` |
 
 The exchange also exposes a gRPC `TokenExchangeService` on its own port. The two
 surfaces share Go packages — `internal/keyset` (signing), `internal/oidc` (JWKS +
 discovery), and `internal/httpmw` (middleware) — but keep separate claims,
 issuers, signing keys, and config (sign-in config is namespaced `SIWE_*`, the
-exchange `PERMISSIONS_*`). The public packages `pkg/tokenclaims` and `pkg/grpc`
+exchange `EXCHANGE_*`). The public packages `pkg/tokenclaims` and `pkg/grpc`
 are consumed by downstream repos.
 
 `PUBLIC_BASE_URL` (e.g. `https://dauth.dimo.zone`) is the host both surfaces are
@@ -157,7 +157,7 @@ Counterfactual (undeployed) smart accounts (EIP-6492) are not supported.
 ## Configuration (environment)
 
 The variables below configure the sign-in surface and the process as a whole.
-The exchange surface's variables are namespaced `PERMISSIONS_*` (see its own
+The exchange surface's variables are namespaced `EXCHANGE_*` (see its own
 section); a few process-wide variables (`PUBLIC_BASE_URL`, `HTTP_ADDRESS`,
 `OPS_ADDRESS`, `LOG_LEVEL`, `ENVIRONMENT`, `DB_*`) are shared.
 
@@ -205,12 +205,12 @@ deterministically as the RFC 7638 JWK thumbprint of the public key.
 3. After `TOKEN_TTL` elapses (no tokens from the old key remain valid), drop the
    old key and deploy.
 
-The same convention and rotation procedure apply to the `/permissions` surface
-under `PERMISSIONS_SIGNING_KEY_*`, which carries its own independent key.
+The same convention and rotation procedure apply to the `/exchange` surface
+under `EXCHANGE_SIGNING_KEY_*`, which carries its own independent key.
 
 ---
 
-# /permissions — token exchange
+# /exchange — permission tokens
 
 Exchanges a `/siwe` address-control token for a permission token scoped to a DIMO
 asset, after validating on-chain/SACD access. It serves both an HTTP API and a
@@ -220,8 +220,8 @@ the endpoints DEX used to serve for the roles-rights issuer).
 ## Exchange flow
 
 ```
-caller                                  /permissions
-  │ POST /permissions/tokens/exchange      │
+caller                                  /exchange
+  │ POST /exchange/tokens/exchange      │
   │   Authorization: Bearer <siwe token>   │  verify sign-in token signature (JWKS),
   │   { asset, permissions, cloudEvents }  │  require registered dev license,
   │ ──────────────────────────────────────▶  read ethereum_address from the token,
@@ -239,7 +239,7 @@ its own `/siwe/keys` (which wouldn't be listening yet at startup). Authorization
 
 ## API
 
-### `POST /permissions/tokens/exchange`
+### `POST /exchange/tokens/exchange`
 
 Requires `Authorization: Bearer <dauth token>`. Request:
 
@@ -267,10 +267,10 @@ alongside the standard `iss` / `sub` / `aud` / `exp` / `nbf` / `iat` / `jti`.
 
 - `GET /` — health check (`{"data":"Server is up and running"}`), served at the
   process root (shared by both surfaces).
-- `GET /permissions/swagger/` — interactive OpenAPI docs.
-- `GET /permissions/keys` (alias `…/permissions/.well-known/jwks.json`) — JWKS for
+- `GET /exchange/swagger/` — interactive OpenAPI docs.
+- `GET /exchange/keys` (alias `…/exchange/.well-known/jwks.json`) — JWKS for
   the permission-token signing key.
-- `GET /permissions/.well-known/openid-configuration` — OIDC discovery metadata.
+- `GET /exchange/.well-known/openid-configuration` — OIDC discovery metadata.
 
 ### gRPC
 
@@ -285,17 +285,17 @@ client (`pkg/grpc`).
 
 ## Configuration (environment)
 
-These configure the `/permissions` surface (the inbound token is validated
+These configure the `/exchange` surface (the inbound token is validated
 against the `/siwe` keyset in-process, so there is no JWKS-URL variable). HTTP and
 ops listeners are shared with the sign-in surface (`HTTP_ADDRESS`, `OPS_ADDRESS`).
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `PERMISSIONS_ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://dauth.dimo.zone/permissions`. |
+| `EXCHANGE_ISSUER` | yes | — | `iss` on minted tokens, e.g. `https://dauth.dimo.zone/exchange`. |
 | `BLOCKCHAIN_NODE_URL` | yes | — | Ethereum RPC for SACD/contract reads. |
 | `IDENTITY_URL` | yes | — | identity-api GraphQL endpoint (dev-license + SACD lookups). |
 | `IPFS_BASE_URL` | yes | — | IPFS gateway for template/permission documents. |
-| `PERMISSIONS_SIGNING_KEY_1`, `PERMISSIONS_SIGNING_KEY_2`, … | yes | — | PEM RSA private keys (independent of the sign-in surface's). `_1` is the active signer. |
+| `EXCHANGE_SIGNING_KEY_1`, `EXCHANGE_SIGNING_KEY_2`, … | yes | — | PEM RSA private keys (independent of the sign-in surface's). `_1` is the active signer. |
 | `TOKEN_EXPIRATION` | no | `10m` | Permission-token lifetime. |
 | `CONTRACT_ADDRESS_SACD` | no | — | SACD contract address. |
 | `CONTRACT_ADDRESS_TEMPLATE` | no | — | Permission-template contract address. |
@@ -326,7 +326,7 @@ ops listeners are shared with the sign-in surface (`HTTP_ADDRESS`, `OPS_ADDRESS`
   count. The schema self-applies at startup; `migrations/` mirrors it for
   out-of-band management.
 - Downstream consumers of the **permission** token point their JWKS URL at
-  `…/permissions/keys`; consumers validating the **sign-in** token point at
+  `…/exchange/keys`; consumers validating the **sign-in** token point at
   `…/siwe/keys`. The exchange validates the inbound sign-in token in-process, so
   no JWKS URL needs wiring between the two surfaces.
 
@@ -351,7 +351,7 @@ make db-down             # stop Postgres and wipe its volume
 
 The **`/siwe` sign-in surface works fully offline** — EOA signing needs no
 backends (set `RPC_URL` only to test smart-account / EIP-1271 login). The
-**`/permissions` exchange boots but can't complete a real exchange** without
+**`/exchange` exchange boots but can't complete a real exchange** without
 identity-api, an Ethereum RPC, and IPFS; point `IDENTITY_URL`,
 `BLOCKCHAIN_NODE_URL`, and `IPFS_BASE_URL` at real (or mocked) services to
 exercise it. To run without Docker, start any Postgres and set the `DB_*` vars

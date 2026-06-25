@@ -36,7 +36,7 @@ env:
   ALLOWABLE_TIME_SKEW: 5m
   RATE_LIMIT_RPS: '20'
   RATE_LIMIT_BURST: '40'
-  PERMISSIONS_ISSUER: https://dauth.dev.dimo.zone/permissions
+  EXCHANGE_ISSUER: https://dauth.dev.dimo.zone/exchange
   TOKEN_EXPIRATION: 10m
   GRPC_PORT: '8086'
   ENABLE_PPROF: 'false'

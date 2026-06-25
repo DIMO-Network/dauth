@@ -1,6 +1,6 @@
 // Package oidc serves the standards-based token-validation surface shared by
-// both binaries: an OIDC discovery document and the JWKS. Neither dauth nor
-// token-exchange is a full OAuth2 authorization server — they issue tokens
+// both surfaces: an OIDC discovery document and the JWKS. Neither the sign-in
+// nor the exchange surface is a full OAuth2 authorization server — they issue tokens
 // through their own flows and publish keys for offline validation — so the
 // authorization and token endpoints are intentionally absent.
 package oidc
