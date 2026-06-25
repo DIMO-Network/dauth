@@ -1,4 +1,4 @@
-package siwe
+package message
 
 import (
 	"testing"

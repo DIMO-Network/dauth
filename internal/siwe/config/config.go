@@ -14,20 +14,16 @@ import (
 	"github.com/DIMO-Network/dauth/internal/envx"
 )
 
-// Settings is the full runtime configuration.
-type Settings struct {
+// Config is the full runtime configuration.
+type Config struct {
 	Environment string
 	LogLevel    string
 
 	// HTTP servers. One public listener serves both the /siwe and /exchange
-	// surfaces; the ops listener serves probes + Prometheus.
-	HTTPAddr       string // HTTP_ADDRESS — public server (both prefixes)
-	OpsAddr        string // OPS_ADDRESS  — probes + Prometheus
-	TLSCertFile    string // optional; TLS usually terminates at the ingress
-	TLSKeyFile     string
-	MaxBodyBytes   int64
-	RateLimitRPS   float64
-	RateLimitBurst int
+	// surfaces; the ops listener serves probes + Prometheus. TLS termination,
+	// rate limiting, and request-size limits are handled at the ingress.
+	HTTPAddr string // HTTP_ADDRESS — public server (both prefixes)
+	OpsAddr  string // OPS_ADDRESS  — probes + Prometheus
 
 	// PublicBaseURL is the externally reachable origin of the merged service
 	// (e.g. https://dauth.dimo.zone). It is the base for each surface's published
@@ -48,9 +44,8 @@ type Settings struct {
 	ChainID uint64 // CHAIN_ID
 
 	// Lifetimes.
-	ChallengeTTL      time.Duration // CHALLENGE_TTL
-	TokenTTL          time.Duration // TOKEN_TTL
-	AllowableTimeSkew time.Duration // ALLOWABLE_TIME_SKEW
+	ChallengeTTL time.Duration // CHALLENGE_TTL
+	TokenTTL     time.Duration // TOKEN_TTL
 
 	// Smart-account (EIP-1271) verification.
 	RPCURL     string        // RPC_URL; empty disables contract-signature checks
@@ -71,18 +66,16 @@ type Settings struct {
 
 // UsePostgres reports whether a Postgres challenge store is configured. When
 // false, dauth falls back to the single-replica in-memory store.
-func (s Settings) UsePostgres() bool { return s.DatabaseURL != "" }
+func (s Config) UsePostgres() bool { return s.DatabaseURL != "" }
 
-// Load reads Settings from the environment, applying defaults, and fails if a
+// Load reads Config from the environment, applying defaults, and fails if a
 // required value is missing or malformed.
-func Load() (Settings, error) {
-	s := Settings{
+func Load() (Config, error) {
+	s := Config{
 		Environment:   envx.String("ENVIRONMENT", "dev"),
 		LogLevel:      envx.String("LOG_LEVEL", "info"),
 		HTTPAddr:      envx.String("HTTP_ADDRESS", "0.0.0.0:8080"),
 		OpsAddr:       envx.String("OPS_ADDRESS", "0.0.0.0:8081"),
-		TLSCertFile:   os.Getenv("TLS_CERT_FILE"),
-		TLSKeyFile:    os.Getenv("TLS_KEY_FILE"),
 		PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
 		Issuer:        os.Getenv("SIWE_ISSUER"),
 		Domain:        os.Getenv("SIWE_DOMAIN"),
@@ -123,30 +116,10 @@ func Load() (Settings, error) {
 		return s, err
 	}
 
-	maxBody, err := envx.Uint("MAX_BODY_BYTES", 16<<10) // 16 KiB; bodies are tiny JSON
-	if err != nil {
-		return s, err
-	}
-	s.MaxBodyBytes = int64(maxBody)
-
-	rps, err := envx.Uint("RATE_LIMIT_RPS", 0)
-	if err != nil {
-		return s, err
-	}
-	s.RateLimitRPS = float64(rps)
-	burst, err := envx.Uint("RATE_LIMIT_BURST", 20)
-	if err != nil {
-		return s, err
-	}
-	s.RateLimitBurst = int(burst)
-
 	if s.ChallengeTTL, err = envx.Duration("CHALLENGE_TTL", 5*time.Minute); err != nil {
 		return s, err
 	}
 	if s.TokenTTL, err = envx.Duration("TOKEN_TTL", time.Hour); err != nil {
-		return s, err
-	}
-	if s.AllowableTimeSkew, err = envx.Duration("ALLOWABLE_TIME_SKEW", 5*time.Minute); err != nil {
 		return s, err
 	}
 	if s.RPCTimeout, err = envx.Duration("RPC_TIMEOUT", 3*time.Second); err != nil {

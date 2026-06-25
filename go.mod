@@ -20,7 +20,6 @@ require (
 	github.com/swaggo/swag v1.16.6
 	github.com/tidwall/gjson v1.19.0
 	go.uber.org/mock v0.6.0
-	golang.org/x/time v0.15.0
 	google.golang.org/grpc v1.81.1
 )
 
@@ -91,6 +90,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
 	golang.org/x/mod v0.33.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

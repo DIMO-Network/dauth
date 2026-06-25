@@ -40,31 +40,31 @@ import (
 // https://dauth.dimo.zone/exchange/keys), which is advertised in the
 // discovery document independently of the iss claim. jwtAuth is the inbound
 // sign-in-token validator (built from the /siwe keyset by the caller).
-func CreateServers(logger zerolog.Logger, settings *config.Settings, jwksURI string, jwtAuth func(http.Handler) http.Handler) (http.Handler, *grpc.Server, error) {
+func CreateServers(logger zerolog.Logger, cfg *config.Config, jwksURI string, jwtAuth func(http.Handler) http.Handler) (http.Handler, *grpc.Server, error) {
 	keys, err := keyset.Load(config.SigningKeys())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load signing keys: %w", err)
 	}
 	ttl := 10 * time.Minute
-	if settings.TokenExpiration != "" {
-		ttl, err = time.ParseDuration(settings.TokenExpiration)
+	if cfg.TokenExpiration != "" {
+		ttl, err = time.ParseDuration(cfg.TokenExpiration)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid TOKEN_EXPIRATION %q: %w", settings.TokenExpiration, err)
+			return nil, nil, fmt.Errorf("invalid TOKEN_EXPIRATION %q: %w", cfg.TokenExpiration, err)
 		}
 	}
-	signer := services.NewTokenSigner(keys, settings.Issuer, ttl)
+	signer := services.NewTokenSigner(keys, cfg.Issuer, ttl)
 
-	ethClient, err := ethclient.Dial(settings.BlockchainNodeURL)
+	ethClient, err := ethclient.Dial(cfg.BlockchainNodeURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to dial Ethereum RPC: %w", err)
 	}
 
-	ipfsService, err := services.NewIPFSClient(&logger, settings.IPFSBaseURL, settings.IPFSTimeout)
+	ipfsService, err := services.NewIPFSClient(&logger, cfg.IPFSBaseURL, cfg.IPFSTimeout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create IPFS client: %w", err)
 	}
 
-	sacdContract, err := sacd.NewSacd(settings.ContractAddressSacd, ethClient)
+	sacdContract, err := sacd.NewSacd(cfg.ContractAddressSacd, ethClient)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to blockchain node: %w", err)
 	}
@@ -73,12 +73,12 @@ func CreateServers(logger zerolog.Logger, settings *config.Settings, jwksURI str
 		HTTP: &http.Client{
 			Timeout: 5 * time.Second, // TODO(elffjs): Configurable?
 		},
-		QueryEndpoint:          settings.IdentityURL,
+		QueryEndpoint:          cfg.IdentityURL,
 		Contract:               sacdContract,
-		ContractAddressVehicle: settings.ContractAddressVehicle,
+		ContractAddressVehicle: cfg.ContractAddressVehicle,
 	}
 
-	templateContract, err := template.NewTemplate(settings.ContractAddressTemplate, ethClient)
+	templateContract, err := template.NewTemplate(cfg.ContractAddressTemplate, ethClient)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to blockchain node: %w", err)
 	}
@@ -88,12 +88,12 @@ func CreateServers(logger zerolog.Logger, settings *config.Settings, jwksURI str
 		return nil, nil, fmt.Errorf("failed to create template service: %w", err)
 	}
 
-	accessService, err := access.NewAccessService(ipfsService, prox, templateService, ethClient, settings.ContractAddressManufacturer)
+	accessService, err := access.NewAccessService(ipfsService, prox, templateService, ethClient, cfg.ContractAddressManufacturer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create access service: %w", err)
 	}
 
-	handler, err := createHTTPServer(logger, settings, keys, signer, accessService, jwksURI, jwtAuth)
+	handler, err := createHTTPServer(logger, cfg, keys, signer, accessService, jwksURI, jwtAuth)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create http server: %w", err)
 	}
@@ -103,16 +103,16 @@ func CreateServers(logger zerolog.Logger, settings *config.Settings, jwksURI str
 	return handler, grpcServer, nil
 }
 
-func createHTTPServer(logger zerolog.Logger, settings *config.Settings, keys *keyset.KeySet, signer *services.TokenSigner, accessService *access.Service, jwksURI string, jwtAuth func(http.Handler) http.Handler) (http.Handler, error) {
-	httpCtrl, err := httpcontroller.NewExchangeController(settings, signer, accessService)
+func createHTTPServer(logger zerolog.Logger, cfg *config.Config, keys *keyset.KeySet, signer *services.TokenSigner, accessService *access.Service, jwksURI string, jwtAuth func(http.Handler) http.Handler) (http.Handler, error) {
+	httpCtrl, err := httpcontroller.NewExchangeController(cfg, signer, accessService)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize exchange controller: %w", err)
 	}
-	idSvc := services.NewIdentityController(&logger, settings)
+	idSvc := services.NewIdentityController(&logger, cfg)
 	devLicense := middleware.NewDevLicenseValidator(idSvc, logger)
 
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
-		Issuer:          settings.Issuer,
+		Issuer:          cfg.Issuer,
 		JWKSURI:         jwksURI,
 		Keys:            keys,
 		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "asset", "permissions", "cloud_events"},

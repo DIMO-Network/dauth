@@ -46,7 +46,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 	mockAccess := NewMockAccessService(mockCtrl)
 
 	// setup app and route req
-	c, err := httpcontroller.NewExchangeController(&config.Settings{
+	c, err := httpcontroller.NewExchangeController(&config.Config{
 		DIMORegistryChainID:         1,
 		ContractAddressManufacturer: contractAddressManufacturer,
 	}, signer, mockAccess)

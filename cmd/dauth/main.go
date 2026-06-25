@@ -14,7 +14,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -24,18 +23,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DIMO-Network/dauth/internal/config"
-	_ "github.com/DIMO-Network/dauth/internal/docs" // registers the sign-in OpenAPI spec (instance "dauth")
 	exchangeapp "github.com/DIMO-Network/dauth/internal/exchange/app"
 	exchangeconfig "github.com/DIMO-Network/dauth/internal/exchange/config"
 	"github.com/DIMO-Network/dauth/internal/exchange/middleware"
 	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/keyset"
-	"github.com/DIMO-Network/dauth/internal/nonce"
 	"github.com/DIMO-Network/dauth/internal/oidc"
-	"github.com/DIMO-Network/dauth/internal/server"
-	"github.com/DIMO-Network/dauth/internal/signer"
-	"github.com/DIMO-Network/dauth/internal/token"
+	"github.com/DIMO-Network/dauth/internal/ops"
+	"github.com/DIMO-Network/dauth/internal/siwe/config"
+	_ "github.com/DIMO-Network/dauth/internal/siwe/docs" // registers the sign-in OpenAPI spec (instance "dauth")
+	"github.com/DIMO-Network/dauth/internal/siwe/nonce"
+	"github.com/DIMO-Network/dauth/internal/siwe/server"
+	"github.com/DIMO-Network/dauth/internal/siwe/signer"
+	"github.com/DIMO-Network/dauth/internal/siwe/token"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,7 +62,7 @@ const maxOutstandingChallenges = 100_000
 // @description its Ethereum address, verifiable offline against the published JWKS.
 // @BasePath    /siwe
 //
-//go:generate go tool swag init -g main.go -d ./cmd/dauth,./internal/server -o ./internal/docs --instanceName dauth --parseInternal
+//go:generate go tool swag init -g main.go -d ./cmd/dauth,./internal/siwe/server -o ./internal/siwe/docs --instanceName dauth --parseInternal
 func main() {
 	log := zerolog.New(os.Stdout).With().Timestamp().Str("app", "dauth").Logger()
 	if err := run(log); err != nil {
@@ -71,15 +71,15 @@ func main() {
 }
 
 func run(log zerolog.Logger) error {
-	settings, err := config.Load()
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	exchangeSettings, err := exchangeconfig.Load()
+	exchangeCfg, err := exchangeconfig.Load()
 	if err != nil {
-		return fmt.Errorf("loading exchange settings: %w", err)
+		return fmt.Errorf("loading exchange config: %w", err)
 	}
-	if level, err := zerolog.ParseLevel(settings.LogLevel); err == nil {
+	if level, err := zerolog.ParseLevel(cfg.LogLevel); err == nil {
 		zerolog.SetGlobalLevel(level)
 	}
 	zerolog.DefaultContextLogger = &log
@@ -88,11 +88,11 @@ func run(log zerolog.Logger) error {
 	defer stop()
 
 	// --- Sign-in (/siwe) surface ---------------------------------------------
-	siweKeys, err := keyset.Load(settings.SigningKeys)
+	siweKeys, err := keyset.Load(cfg.SigningKeys)
 	if err != nil {
 		return err
 	}
-	siweHandler, err := buildSIWE(ctx, settings, siweKeys, log)
+	siweHandler, err := buildSIWE(ctx, cfg, siweKeys, log)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	exchangeHandler, grpcServer, err := exchangeapp.CreateServers(log, &exchangeSettings, settings.PublicBaseURL+"/exchange/keys", jwtAuth)
+	exchangeHandler, grpcServer, err := exchangeapp.CreateServers(log, &exchangeCfg, cfg.PublicBaseURL+"/exchange/keys", jwtAuth)
 	if err != nil {
 		return fmt.Errorf("building exchange surface: %w", err)
 	}
@@ -121,43 +121,35 @@ func run(log zerolog.Logger) error {
 	publicHandler := httpmw.Recover(log)(mux)
 
 	publicSrv := &http.Server{
-		Addr:              settings.HTTPAddr,
+		Addr:              cfg.HTTPAddr,
 		Handler:           publicHandler,
-		ReadHeaderTimeout: server.DefaultTimeout,
-	}
-	useTLS := settings.TLSCertFile != ""
-	if useTLS {
-		cert, err := loadTLS(settings.TLSCertFile, settings.TLSKeyFile)
-		if err != nil {
-			return err
-		}
-		publicSrv.TLSConfig = cert
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	opsSrv := server.NewOpsServer(server.OpsConfig{Addr: settings.OpsAddr, EnablePprof: exchangeSettings.EnablePprof})
+	opsSrv := ops.NewServer(ops.Config{Addr: cfg.OpsAddr, EnablePprof: exchangeCfg.EnablePprof})
 
 	group, gctx := errgroup.WithContext(ctx)
-	group.Go(func() error { return serveHTTP(gctx, publicSrv, useTLS, log) })
-	group.Go(func() error { return serveHTTP(gctx, opsSrv, false, log) })
-	group.Go(func() error { return serveGRPC(gctx, grpcServer, fmt.Sprintf(":%d", exchangeSettings.GRPCPort), log) })
+	group.Go(func() error { return serveHTTP(gctx, publicSrv, log) })
+	group.Go(func() error { return serveHTTP(gctx, opsSrv, log) })
+	group.Go(func() error { return serveGRPC(gctx, grpcServer, fmt.Sprintf(":%d", exchangeCfg.GRPCPort), log) })
 
 	log.Info().
-		Str("http", settings.HTTPAddr).Str("ops", settings.OpsAddr).Int("grpc", exchangeSettings.GRPCPort).
-		Str("public_base_url", settings.PublicBaseURL).
-		Str("siwe_issuer", settings.Issuer).Str("siwe_active_kid", siweKeys.ActiveKID()).
-		Str("exchange_issuer", exchangeSettings.Issuer).
+		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).Int("grpc", exchangeCfg.GRPCPort).
+		Str("public_base_url", cfg.PublicBaseURL).
+		Str("siwe_issuer", cfg.Issuer).Str("siwe_active_kid", siweKeys.ActiveKID()).
+		Str("exchange_issuer", exchangeCfg.Issuer).
 		Msg("dauth started")
 	return group.Wait()
 }
 
 // buildSIWE constructs the sign-in surface handler from an already-loaded
 // keyset.
-func buildSIWE(ctx context.Context, settings config.Settings, keys *keyset.KeySet, log zerolog.Logger) (http.Handler, error) {
+func buildSIWE(ctx context.Context, cfg config.Config, keys *keyset.KeySet, log zerolog.Logger) (http.Handler, error) {
 	// EIP-1271 (smart-account) verification needs an RPC backend. Without one
 	// the service still verifies EOA signatures.
 	var backend bind.ContractBackend
-	if settings.RPCURL != "" {
-		client, err := ethclient.Dial(settings.RPCURL)
+	if cfg.RPCURL != "" {
+		client, err := ethclient.Dial(cfg.RPCURL)
 		if err != nil {
 			return nil, err
 		}
@@ -168,7 +160,7 @@ func buildSIWE(ctx context.Context, settings config.Settings, keys *keyset.KeySe
 		log.Warn().Msg("RPC_URL not set; smart-account (EIP-1271) sign-in is disabled")
 	}
 
-	store, err := newStore(ctx, settings, log)
+	store, err := newStore(ctx, cfg, log)
 	if err != nil {
 		return nil, err
 	}
@@ -178,21 +170,21 @@ func buildSIWE(ctx context.Context, settings config.Settings, keys *keyset.KeySe
 		Verifier: signer.New(backend, log),
 		Issuer: token.NewIssuer(token.Config{
 			Keys:     keys,
-			Issuer:   settings.Issuer,
-			Audience: settings.Audience,
-			TTL:      settings.TokenTTL,
+			Issuer:   cfg.Issuer,
+			Audience: cfg.Audience,
+			TTL:      cfg.TokenTTL,
 		}),
-		Domain:       settings.Domain,
-		URI:          settings.PublicBaseURL,
-		Statement:    settings.Statement,
-		ChainID:      settings.ChainID,
-		ChallengeTTL: settings.ChallengeTTL,
+		Domain:       cfg.Domain,
+		URI:          cfg.PublicBaseURL,
+		Statement:    cfg.Statement,
+		ChainID:      cfg.ChainID,
+		ChallengeTTL: cfg.ChallengeTTL,
 		Log:          log,
 	}
 
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
-		Issuer:          settings.Issuer,
-		JWKSURI:         settings.PublicBaseURL + "/siwe/keys",
+		Issuer:          cfg.Issuer,
+		JWKSURI:         cfg.PublicBaseURL + "/siwe/keys",
 		Keys:            keys,
 		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "ethereum_address"},
 	})
@@ -201,11 +193,8 @@ func buildSIWE(ctx context.Context, settings config.Settings, keys *keyset.KeySe
 	}
 
 	handler := server.NewSIWEHandler(server.SIWEConfig{
-		Handlers:       handlers,
-		WellKnown:      wellKnown,
-		MaxBodyBytes:   settings.MaxBodyBytes,
-		RateLimitRPS:   settings.RateLimitRPS,
-		RateLimitBurst: settings.RateLimitBurst,
+		Handlers:  handlers,
+		WellKnown: wellKnown,
 	})
 	return handler, nil
 }
@@ -215,27 +204,17 @@ func healthCheck(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"data":"Server is up and running"}`))
 }
 
-// loadTLS builds a TLS config for in-process termination. The usual deployment
-// terminates TLS at the ingress and leaves cert/key unset.
-func loadTLS(certFile, keyFile string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("loading TLS key pair: %w", err)
-	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, nil
-}
-
 // newStore builds the challenge store. With a Postgres DSN configured it
 // returns a shared, replica-safe store (and opens a connection pool closed when
 // ctx is cancelled); otherwise it returns the in-memory store, which requires a
 // single replica.
-func newStore(ctx context.Context, settings config.Settings, log zerolog.Logger) (nonce.Store, error) {
-	if !settings.UsePostgres() {
+func newStore(ctx context.Context, cfg config.Config, log zerolog.Logger) (nonce.Store, error) {
+	if !cfg.UsePostgres() {
 		log.Warn().Msg("DATABASE_URL not set; using in-memory challenge store (dauth must run a single replica)")
 		return nonce.NewMemory(ctx, maxOutstandingChallenges), nil
 	}
 
-	pool, err := pgxpool.New(ctx, settings.DatabaseURL)
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("opening challenge database: %w", err)
 	}
@@ -260,15 +239,10 @@ func newStore(ctx context.Context, settings config.Settings, log zerolog.Logger)
 }
 
 // serveHTTP runs srv until ctx cancels, then shuts it down gracefully.
-func serveHTTP(ctx context.Context, srv *http.Server, useTLS bool, log zerolog.Logger) error {
+func serveHTTP(ctx context.Context, srv *http.Server, log zerolog.Logger) error {
 	errCh := make(chan error, 1)
 	go func() {
-		var err error
-		if useTLS {
-			err = srv.ListenAndServeTLS("", "")
-		} else {
-			err = srv.ListenAndServe()
-		}
+		err := srv.ListenAndServe()
 		if !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

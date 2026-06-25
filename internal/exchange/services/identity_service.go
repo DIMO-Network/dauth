@@ -23,11 +23,11 @@ type IdentityController struct {
 
 const IdentityAPINotFoundError = "NOT_FOUND"
 
-func NewIdentityController(logger *zerolog.Logger, settings *config.Settings) *IdentityController {
+func NewIdentityController(logger *zerolog.Logger, cfg *config.Config) *IdentityController {
 	return &IdentityController{
 		logger:      logger,
 		client:      &http.Client{},
-		identityURL: settings.IdentityURL,
+		identityURL: cfg.IdentityURL,
 	}
 }
 

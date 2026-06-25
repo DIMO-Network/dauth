@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/httpmw"
-	"github.com/DIMO-Network/dauth/internal/nonce"
-	"github.com/DIMO-Network/dauth/internal/signer"
-	"github.com/DIMO-Network/dauth/internal/siwe"
-	"github.com/DIMO-Network/dauth/internal/token"
+	"github.com/DIMO-Network/dauth/internal/siwe/message"
+	"github.com/DIMO-Network/dauth/internal/siwe/nonce"
+	"github.com/DIMO-Network/dauth/internal/siwe/signer"
+	"github.com/DIMO-Network/dauth/internal/siwe/token"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/rs/zerolog"
@@ -109,7 +109,7 @@ func (h *Handlers) Challenge() http.Handler {
 
 		now := h.now().UTC()
 		expiresAt := now.Add(h.ChallengeTTL)
-		msg := siwe.Message{
+		msg := message.Message{
 			Domain:         h.Domain,
 			Address:        addr,
 			Statement:      h.Statement,

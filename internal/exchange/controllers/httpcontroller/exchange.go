@@ -70,10 +70,10 @@ type TokenResponse struct {
 	Token string `json:"token"`
 }
 
-func NewExchangeController(settings *config.Settings, signer TokenSigner, accessService AccessService) (*ExchangeController, error) {
+func NewExchangeController(cfg *config.Config, signer TokenSigner, accessService AccessService) (*ExchangeController, error) {
 	return &ExchangeController{
-		chainID:                     settings.DIMORegistryChainID,
-		contractAddressManufacturer: settings.ContractAddressManufacturer,
+		chainID:                     cfg.DIMORegistryChainID,
+		contractAddressManufacturer: cfg.ContractAddressManufacturer,
 		signer:                      signer,
 		accessService:               accessService,
 	}, nil

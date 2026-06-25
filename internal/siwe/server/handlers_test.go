@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/keyset"
-	"github.com/DIMO-Network/dauth/internal/nonce"
 	"github.com/DIMO-Network/dauth/internal/oidc"
-	"github.com/DIMO-Network/dauth/internal/signer"
-	"github.com/DIMO-Network/dauth/internal/token"
+	"github.com/DIMO-Network/dauth/internal/siwe/nonce"
+	"github.com/DIMO-Network/dauth/internal/siwe/signer"
+	"github.com/DIMO-Network/dauth/internal/siwe/token"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"

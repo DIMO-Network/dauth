@@ -2,7 +2,7 @@
 // configuration from the environment, following the dauth/din convention: pure
 // env vars, defaults applied at the call site, and fail-fast parse errors so a
 // misconfigured deployment never starts. The config packages compose these into
-// their Settings.
+// their Config.
 package envx
 
 import (

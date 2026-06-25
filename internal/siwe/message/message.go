@@ -3,7 +3,7 @@
 // nonce, so the bytes the wallet signs are exactly the bytes dauth verifies —
 // there is no client-supplied message to re-parse and no canonicalization gap
 // for an attacker to exploit.
-package siwe
+package message
 
 import (
 	"fmt"

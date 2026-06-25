@@ -3,7 +3,7 @@ package app
 // General OpenAPI annotations for the exchange (/exchange) surface. These
 // live here — not on the merged cmd/dauth main — so they are scanned only for
 // the exchange spec (instance "swagger") and never leak into the sign-in spec
-// (instance "dauth", generated from ./cmd/dauth,./internal/server).
+// (instance "dauth", generated from ./cmd/dauth,./internal/siwe/server).
 //
 // @title                      DIMO Token Exchange API
 // @version                    1.0

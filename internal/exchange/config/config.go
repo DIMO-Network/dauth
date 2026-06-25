@@ -13,8 +13,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// Settings is the full runtime configuration.
-type Settings struct {
+// Config is the full runtime configuration.
+type Config struct {
 	Environment string
 	LogLevel    string
 	ServiceName string
@@ -40,10 +40,10 @@ type Settings struct {
 	DIMORegistryChainID         uint64
 }
 
-// Load reads Settings from the environment, applying defaults, and fails if a
+// Load reads Config from the environment, applying defaults, and fails if a
 // required value is missing or malformed.
-func Load() (Settings, error) {
-	s := Settings{
+func Load() (Config, error) {
+	s := Config{
 		Environment:                 envx.String("ENVIRONMENT", "local"),
 		LogLevel:                    envx.String("LOG_LEVEL", "info"),
 		ServiceName:                 envx.String("SERVICE_NAME", "token-exchange-api"),
@@ -77,7 +77,7 @@ func Load() (Settings, error) {
 }
 
 // required lists the env values that must be set for the service to start.
-func required(s Settings) map[string]string {
+func required(s Config) map[string]string {
 	return map[string]string{
 		"EXCHANGE_ISSUER":     s.Issuer,
 		"BLOCKCHAIN_NODE_URL": s.BlockchainNodeURL,
