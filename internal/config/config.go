@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/DIMO-Network/dauth/internal/envx"
 	"github.com/DIMO-Network/shared/pkg/db"
 )
 
@@ -76,18 +76,18 @@ func (s Settings) UsePostgres() bool { return s.DB.Host != "" }
 // required value is missing or malformed.
 func Load() (Settings, error) {
 	s := Settings{
-		Environment:   env("ENVIRONMENT", "dev"),
-		LogLevel:      env("LOG_LEVEL", "info"),
-		HTTPAddr:      env("HTTP_ADDRESS", "0.0.0.0:8080"),
-		OpsAddr:       env("OPS_ADDRESS", "0.0.0.0:8081"),
+		Environment:   envx.String("ENVIRONMENT", "dev"),
+		LogLevel:      envx.String("LOG_LEVEL", "info"),
+		HTTPAddr:      envx.String("HTTP_ADDRESS", "0.0.0.0:8080"),
+		OpsAddr:       envx.String("OPS_ADDRESS", "0.0.0.0:8081"),
 		TLSCertFile:   os.Getenv("TLS_CERT_FILE"),
 		TLSKeyFile:    os.Getenv("TLS_KEY_FILE"),
 		PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
 		Issuer:        os.Getenv("SIWE_ISSUER"),
 		Domain:        os.Getenv("SIWE_DOMAIN"),
-		Statement:     env("SIWE_STATEMENT", "Sign in to DIMO."),
+		Statement:     envx.String("SIWE_STATEMENT", "Sign in to DIMO."),
 		RPCURL:        os.Getenv("RPC_URL"),
-		Audience:      splitList(os.Getenv("JWT_AUDIENCE")),
+		Audience:      envx.List(os.Getenv("JWT_AUDIENCE")),
 	}
 
 	if s.Issuer == "" {
@@ -118,43 +118,43 @@ func Load() (Settings, error) {
 		return s, errors.New("JWT_AUDIENCE is required (comma-separated audience list)")
 	}
 
-	if s.ChainID, err = envUint("CHAIN_ID", 137); err != nil {
+	if s.ChainID, err = envx.Uint("CHAIN_ID", 137); err != nil {
 		return s, err
 	}
 
-	maxBody, err := envUint("MAX_BODY_BYTES", 16<<10) // 16 KiB; bodies are tiny JSON
+	maxBody, err := envx.Uint("MAX_BODY_BYTES", 16<<10) // 16 KiB; bodies are tiny JSON
 	if err != nil {
 		return s, err
 	}
 	s.MaxBodyBytes = int64(maxBody)
 
-	rps, err := envUint("RATE_LIMIT_RPS", 0)
+	rps, err := envx.Uint("RATE_LIMIT_RPS", 0)
 	if err != nil {
 		return s, err
 	}
 	s.RateLimitRPS = float64(rps)
-	burst, err := envUint("RATE_LIMIT_BURST", 20)
+	burst, err := envx.Uint("RATE_LIMIT_BURST", 20)
 	if err != nil {
 		return s, err
 	}
 	s.RateLimitBurst = int(burst)
 
-	if s.ChallengeTTL, err = envDuration("CHALLENGE_TTL", 5*time.Minute); err != nil {
+	if s.ChallengeTTL, err = envx.Duration("CHALLENGE_TTL", 5*time.Minute); err != nil {
 		return s, err
 	}
-	if s.TokenTTL, err = envDuration("TOKEN_TTL", time.Hour); err != nil {
+	if s.TokenTTL, err = envx.Duration("TOKEN_TTL", time.Hour); err != nil {
 		return s, err
 	}
-	if s.AllowableTimeSkew, err = envDuration("ALLOWABLE_TIME_SKEW", 5*time.Minute); err != nil {
+	if s.AllowableTimeSkew, err = envx.Duration("ALLOWABLE_TIME_SKEW", 5*time.Minute); err != nil {
 		return s, err
 	}
-	if s.RPCTimeout, err = envDuration("RPC_TIMEOUT", 3*time.Second); err != nil {
+	if s.RPCTimeout, err = envx.Duration("RPC_TIMEOUT", 3*time.Second); err != nil {
 		return s, err
 	}
 
 	// Signing keys: SIGNING_KEY_1, SIGNING_KEY_2, ... in order. The first is
 	// the active signer. At least one is required to mint tokens.
-	s.SigningKeys = numberedEnv("SIWE_SIGNING_KEY_")
+	s.SigningKeys = envx.Numbered("SIWE_SIGNING_KEY_")
 	if len(s.SigningKeys) == 0 {
 		return s, errors.New("at least one signing key is required (SIWE_SIGNING_KEY_1, SIWE_SIGNING_KEY_2, ...)")
 	}
@@ -163,21 +163,21 @@ func Load() (Settings, error) {
 	// leaving it empty keeps the in-memory store. When it is set, the
 	// credentials and database name must be present too — fail fast rather than
 	// surface an opaque connection error at first sign-in.
-	maxOpen, err := envUint("DB_MAX_OPEN_CONNECTIONS", 10)
+	maxOpen, err := envx.Uint("DB_MAX_OPEN_CONNECTIONS", 10)
 	if err != nil {
 		return s, err
 	}
-	maxIdle, err := envUint("DB_MAX_IDLE_CONNECTIONS", 5)
+	maxIdle, err := envx.Uint("DB_MAX_IDLE_CONNECTIONS", 5)
 	if err != nil {
 		return s, err
 	}
 	s.DB = db.Settings{
 		Host:               os.Getenv("DB_HOST"),
-		Port:               env("DB_PORT", "5432"),
+		Port:               envx.String("DB_PORT", "5432"),
 		User:               os.Getenv("DB_USER"),
 		Password:           os.Getenv("DB_PASSWORD"),
 		Name:               os.Getenv("DB_NAME"),
-		SSLMode:            env("DB_SSL_MODE", db.SSLModeRequire),
+		SSLMode:            envx.String("DB_SSL_MODE", db.SSLModeRequire),
 		MaxOpenConnections: int(maxOpen),
 		MaxIdleConnections: int(maxIdle),
 	}
@@ -188,65 +188,4 @@ func Load() (Settings, error) {
 	}
 
 	return s, nil
-}
-
-// numberedEnv collects values from prefix+"1", prefix+"2", ... stopping at the
-// first gap, so a contiguous, ordered key list comes straight from the
-// environment without a separate count variable.
-func numberedEnv(prefix string) []string {
-	var out []string
-	for i := 1; ; i++ {
-		v := os.Getenv(prefix + strconv.Itoa(i))
-		if v == "" {
-			break
-		}
-		out = append(out, v)
-	}
-	return out
-}
-
-// splitList parses a comma-separated env value into a trimmed, non-empty slice.
-func splitList(v string) []string {
-	if v == "" {
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func envUint(key string, def uint64) (uint64, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parsing %s: %w", key, err)
-	}
-	return n, nil
-}
-
-func envDuration(key string, def time.Duration) (time.Duration, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("parsing %s: %w", key, err)
-	}
-	return d, nil
 }
