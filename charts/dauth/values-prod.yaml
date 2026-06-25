@@ -30,15 +30,10 @@ env:
   DIMO_REGISTRY_CHAIN_ID: "137"
 
 # Postgres-backed challenge store. When enabled, raise replicaCount above 1 and
-# provision the dauth/db_user + dauth/db_password secrets in AWS Secrets Manager.
+# provision the dauth/database_url secret (a postgres:// connection URL) in AWS
+# Secrets Manager.
 postgres:
   enabled: false
-  host: ''
-  port: '5432'
-  name: dauth
-  sslMode: require
-  maxOpenConnections: '10'
-  maxIdleConnections: '5'
 
 resources:
   limits:

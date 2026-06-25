@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/envx"
-	"github.com/DIMO-Network/shared/pkg/db"
 )
 
 // Settings is the full runtime configuration.
@@ -62,15 +61,17 @@ type Settings struct {
 	// during a rotation overlap window. Each is a PEM-encoded RSA private key.
 	SigningKeys []string
 
-	// DB configures the Postgres-backed challenge store. It is engaged only when
-	// DB.Host is set; otherwise dauth uses the in-memory store and must run a
-	// single replica. A shared store is what allows more than one replica.
-	DB db.Settings
+	// DatabaseURL is the pgx connection URL for the Postgres-backed challenge
+	// store (e.g. postgres://user:pass@host:5432/dauth?sslmode=require). It is
+	// engaged only when set; otherwise dauth uses the in-memory store and must
+	// run a single replica. A shared store is what allows more than one replica.
+	// Pool sizing is tuned inline via pgx query params, e.g. ?pool_max_conns=10.
+	DatabaseURL string
 }
 
 // UsePostgres reports whether a Postgres challenge store is configured. When
 // false, dauth falls back to the single-replica in-memory store.
-func (s Settings) UsePostgres() bool { return s.DB.Host != "" }
+func (s Settings) UsePostgres() bool { return s.DatabaseURL != "" }
 
 // Load reads Settings from the environment, applying defaults, and fails if a
 // required value is missing or malformed.
@@ -159,31 +160,15 @@ func Load() (Settings, error) {
 		return s, errors.New("at least one signing key is required (SIWE_SIGNING_KEY_1, SIWE_SIGNING_KEY_2, ...)")
 	}
 
-	// Challenge store. DB_HOST opts into Postgres (and thus multiple replicas);
-	// leaving it empty keeps the in-memory store. When it is set, the
-	// credentials and database name must be present too — fail fast rather than
-	// surface an opaque connection error at first sign-in.
-	maxOpen, err := envx.Uint("DB_MAX_OPEN_CONNECTIONS", 10)
-	if err != nil {
-		return s, err
-	}
-	maxIdle, err := envx.Uint("DB_MAX_IDLE_CONNECTIONS", 5)
-	if err != nil {
-		return s, err
-	}
-	s.DB = db.Settings{
-		Host:               os.Getenv("DB_HOST"),
-		Port:               envx.String("DB_PORT", "5432"),
-		User:               os.Getenv("DB_USER"),
-		Password:           os.Getenv("DB_PASSWORD"),
-		Name:               os.Getenv("DB_NAME"),
-		SSLMode:            envx.String("DB_SSL_MODE", db.SSLModeRequire),
-		MaxOpenConnections: int(maxOpen),
-		MaxIdleConnections: int(maxIdle),
-	}
+	// Challenge store. DATABASE_URL opts into Postgres (and thus multiple
+	// replicas); leaving it empty keeps the in-memory store. Validate the shape
+	// here so a malformed URL fails at startup rather than at first sign-in;
+	// pgx does the full parse when the pool opens.
+	s.DatabaseURL = os.Getenv("DATABASE_URL")
 	if s.UsePostgres() {
-		if s.DB.User == "" || s.DB.Password == "" || s.DB.Name == "" {
-			return s, errors.New("DB_HOST is set, so DB_USER, DB_PASSWORD, and DB_NAME are all required")
+		u, err := url.Parse(s.DatabaseURL)
+		if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+			return s, fmt.Errorf("DATABASE_URL must be a postgres:// connection URL, got %q", s.DatabaseURL)
 		}
 	}
 

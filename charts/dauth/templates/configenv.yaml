@@ -9,13 +9,7 @@ data:
 {{- range $key, $val := .Values.env }}
   {{ $key }} : {{ $val | quote }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
-  # Postgres challenge store. Setting DB_HOST lets dauth run multiple replicas;
-  # DB_USER/DB_PASSWORD come from the ExternalSecret (see secret.yaml).
-  DB_HOST: {{ .Values.postgres.host | quote }}
-  DB_PORT: {{ .Values.postgres.port | quote }}
-  DB_NAME: {{ .Values.postgres.name | quote }}
-  DB_SSL_MODE: {{ .Values.postgres.sslMode | quote }}
-  DB_MAX_OPEN_CONNECTIONS: {{ .Values.postgres.maxOpenConnections | quote }}
-  DB_MAX_IDLE_CONNECTIONS: {{ .Values.postgres.maxIdleConnections | quote }}
-{{- end }}
+  # The Postgres challenge store's connection (DATABASE_URL) lives entirely in
+  # the ExternalSecret (see secret.yaml); setting it lets dauth run multiple
+  # replicas. Pool sizing is tuned inline via pgx query params, e.g.
+  # ?pool_max_conns=10.

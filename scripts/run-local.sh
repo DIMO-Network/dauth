@@ -36,8 +36,8 @@ export BLOCKCHAIN_NODE_URL="${BLOCKCHAIN_NODE_URL:-http://localhost:8545}"
 export IDENTITY_URL="${IDENTITY_URL:-http://localhost:3001/query}"
 export IPFS_BASE_URL="${IPFS_BASE_URL:-http://localhost:3002}"
 
-# Postgres challenge store — matches docker-compose.yml.
-export DB_HOST=localhost DB_PORT="${DB_PORT:-5433}" DB_USER=dauth DB_PASSWORD=dauth DB_NAME=dauth DB_SSL_MODE=disable
+# Postgres challenge store — matches docker-compose.yml (host port 5433).
+export DATABASE_URL="${DATABASE_URL:-postgres://dauth:dauth@localhost:5433/dauth?sslmode=disable}"
 
 echo "→ dauth: http://localhost:8080  (ops :8081, grpc :8086)"
 echo "  sign-in demo:  make signin"
