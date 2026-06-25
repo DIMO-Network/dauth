@@ -2,20 +2,19 @@ package nonce
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// newTestPostgres connects to the database named by TEST_DATABASE_URL (a libpq
-// DSN, e.g. "postgres://user:pass@localhost:5432/dauth_test?sslmode=disable"),
+// newTestPostgres connects to the database named by TEST_DATABASE_URL (a pgx
+// connection URL, e.g. "postgres://user:pass@localhost:5432/dauth_test?sslmode=disable"),
 // skipping the test when it is unset so CI without a database stays green. Each
 // call starts from an empty table.
 func newTestPostgres(t *testing.T) *Postgres {
@@ -24,14 +23,15 @@ func newTestPostgres(t *testing.T) *Postgres {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres challenge store tests")
 	}
-	db, err := sql.Open("postgres", dsn)
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
-	require.NoError(t, db.Ping())
+	t.Cleanup(db.Close)
+	require.NoError(t, db.Ping(ctx))
 
-	p, err := NewPostgres(context.Background(), db, zerolog.Nop())
+	p, err := NewPostgres(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	_, err = db.Exec(`TRUNCATE nonce_challenges`)
+	_, err = db.Exec(ctx, `TRUNCATE nonce_challenges`)
 	require.NoError(t, err)
 	return p
 }

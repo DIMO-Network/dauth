@@ -159,7 +159,7 @@ Counterfactual (undeployed) smart accounts (EIP-6492) are not supported.
 The variables below configure the sign-in surface and the process as a whole.
 The exchange surface's variables are namespaced `EXCHANGE_*` (see its own
 section); a few process-wide variables (`PUBLIC_BASE_URL`, `HTTP_ADDRESS`,
-`OPS_ADDRESS`, `LOG_LEVEL`, `ENVIRONMENT`, `DB_*`) are shared.
+`OPS_ADDRESS`, `LOG_LEVEL`, `ENVIRONMENT`, `DATABASE_URL`) are shared.
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
@@ -181,7 +181,7 @@ section); a few process-wide variables (`PUBLIC_BASE_URL`, `HTTP_ADDRESS`,
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | no | `0` / `20` | Per-IP limit; `0` disables. |
 | `LOG_LEVEL` | no | `info` | zerolog level. |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | no | — | In-process TLS; omit to terminate at the ingress. |
-| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | no | — | Postgres challenge store (enables multiple replicas). See [deployment](#deployment). |
+| `DATABASE_URL` | no | — | Postgres challenge store as a `postgres://user:pass@host:5432/dauth?sslmode=require` URL; enables multiple replicas. Tune pool sizing inline, e.g. `?pool_max_conns=10`. Empty uses the in-memory single-replica store. See [deployment](#deployment). |
 
 ## Signing keys
 
@@ -320,8 +320,8 @@ ops listeners are shared with the sign-in surface (`HTTP_ADDRESS`, `OPS_ADDRESS`
 - **Challenge store and replicas.** By default the sign-in surface keeps issued
   challenges in an in-memory `nonce.Store`, so a challenge must be redeemed on the
   pod that issued it — keep `replicaCount: 1`. To scale out, enable the Postgres
-  store (`postgres.enabled` in the chart, or set `DB_HOST` + `DB_USER`/
-  `DB_PASSWORD`/`DB_NAME`): challenges become shared across pods (single-use
+  store (`postgres.enabled` in the chart, or set `DATABASE_URL`): challenges
+  become shared across pods (single-use
   enforced by an atomic `DELETE ... RETURNING`), and you can raise the replica
   count. The schema self-applies at startup; `migrations/` mirrors it for
   out-of-band management.
@@ -354,8 +354,8 @@ backends (set `RPC_URL` only to test smart-account / EIP-1271 login). The
 **`/exchange` exchange boots but can't complete a real exchange** without
 identity-api, an Ethereum RPC, and IPFS; point `IDENTITY_URL`,
 `BLOCKCHAIN_NODE_URL`, and `IPFS_BASE_URL` at real (or mocked) services to
-exercise it. To run without Docker, start any Postgres and set the `DB_*` vars
-yourself (or leave `DB_HOST` unset to use the in-memory single-replica store).
+exercise it. To run without Docker, start any Postgres and set `DATABASE_URL`
+yourself (or leave it unset to use the in-memory single-replica store).
 
 The gRPC stubs in `pkg/grpc` are regenerated from `pkg/grpc/*.proto` with
 [`buf`](https://buf.build) (`buf generate`); the plugin versions are pinned via

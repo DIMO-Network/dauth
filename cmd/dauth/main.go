@@ -15,7 +15,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -39,7 +38,7 @@ import (
 	"github.com/DIMO-Network/dauth/internal/token"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/ethclient"
-	_ "github.com/lib/pq" // database/sql driver for the Postgres challenge store
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -232,32 +231,30 @@ func loadTLS(certFile, keyFile string) (*tls.Config, error) {
 // single replica.
 func newStore(ctx context.Context, settings config.Settings, log zerolog.Logger) (nonce.Store, error) {
 	if !settings.UsePostgres() {
-		log.Warn().Msg("DB_HOST not set; using in-memory challenge store (dauth must run a single replica)")
+		log.Warn().Msg("DATABASE_URL not set; using in-memory challenge store (dauth must run a single replica)")
 		return nonce.NewMemory(ctx, maxOutstandingChallenges), nil
 	}
 
-	// withSearchPath=false: the table lives in the default (public) schema.
-	sqlDB, err := sql.Open("postgres", settings.DB.BuildConnectionString(false))
+	pool, err := pgxpool.New(ctx, settings.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("opening challenge database: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(settings.DB.MaxOpenConnections)
-	sqlDB.SetMaxIdleConns(settings.DB.MaxIdleConnections)
-	if err := sqlDB.PingContext(ctx); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("connecting to challenge database %s:%s: %w", settings.DB.Host, settings.DB.Port, err)
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("connecting to challenge database: %w", err)
 	}
 	// The pool lives for the process; release it on shutdown.
 	go func() {
 		<-ctx.Done()
-		sqlDB.Close()
+		pool.Close()
 	}()
 
-	store, err := nonce.NewPostgres(ctx, sqlDB, log)
+	store, err := nonce.NewPostgres(ctx, pool, log)
 	if err != nil {
 		return nil, err
 	}
-	log.Info().Str("db_host", settings.DB.Host).Str("db_name", settings.DB.Name).
+	cc := pool.Config().ConnConfig
+	log.Info().Str("db_host", cc.Host).Str("db_name", cc.Database).
 		Msg("using Postgres challenge store")
 	return store, nil
 }

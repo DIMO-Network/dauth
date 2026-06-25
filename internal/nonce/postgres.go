@@ -2,13 +2,14 @@ package nonce
 
 import (
 	"context"
-	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 )
 
@@ -27,7 +28,7 @@ var schema string
 // HTTP rate limiter in front of /auth/challenge and by the janitor sweeping
 // expired rows; each row is tiny and short-lived.
 type Postgres struct {
-	db  *sql.DB
+	db  *pgxpool.Pool
 	now func() time.Time
 	log zerolog.Logger
 }
@@ -35,8 +36,8 @@ type Postgres struct {
 // NewPostgres ensures the schema exists on db and starts a background janitor
 // that evicts expired challenges until ctx is cancelled. The caller owns db's
 // lifecycle (open and Close).
-func NewPostgres(ctx context.Context, db *sql.DB, log zerolog.Logger) (*Postgres, error) {
-	if _, err := db.ExecContext(ctx, schema); err != nil {
+func NewPostgres(ctx context.Context, db *pgxpool.Pool, log zerolog.Logger) (*Postgres, error) {
+	if _, err := db.Exec(ctx, schema); err != nil {
 		return nil, fmt.Errorf("ensuring nonce schema: %w", err)
 	}
 	p := &Postgres{db: db, now: time.Now, log: log}
@@ -48,7 +49,7 @@ func NewPostgres(ctx context.Context, db *sql.DB, log zerolog.Logger) (*Postgres
 // random bytes) surfaces as an error and the handler reports the challenge
 // store unavailable.
 func (p *Postgres) Put(ctx context.Context, id string, ch Challenge) error {
-	_, err := p.db.ExecContext(ctx,
+	_, err := p.db.Exec(ctx,
 		`INSERT INTO nonce_challenges (nonce, message, address, expires_at)
 		 VALUES ($1, $2, $3, $4)`,
 		id, ch.Message, ch.Address.Bytes(), ch.ExpiresAt)
@@ -68,12 +69,12 @@ func (p *Postgres) Consume(ctx context.Context, id string) (Challenge, error) {
 		addr    []byte
 		expires time.Time
 	)
-	err := p.db.QueryRowContext(ctx,
+	err := p.db.QueryRow(ctx,
 		`DELETE FROM nonce_challenges WHERE nonce = $1
 		 RETURNING message, address, expires_at`, id).
 		Scan(&msg, &addr, &expires)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		return Challenge{}, ErrNotFound
 	case err != nil:
 		return Challenge{}, fmt.Errorf("consuming challenge: %w", err)
@@ -99,13 +100,13 @@ func (p *Postgres) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			res, err := p.db.ExecContext(ctx,
+			res, err := p.db.Exec(ctx,
 				`DELETE FROM nonce_challenges WHERE expires_at < $1`, p.now())
 			if err != nil {
 				p.log.Warn().Err(err).Msg("nonce janitor sweep failed")
 				continue
 			}
-			if n, _ := res.RowsAffected(); n > 0 {
+			if n := res.RowsAffected(); n > 0 {
 				p.log.Debug().Int64("evicted", n).Msg("nonce janitor swept expired challenges")
 			}
 		}
