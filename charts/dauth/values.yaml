@@ -2,7 +2,7 @@ replicaCount: 1
 image:
   repository: dimozone/dauth
   pullPolicy: IfNotPresent
-  tag: d0df91f
+  tag: 3a070ae
 imagePullSecrets: []
 nameOverride: ''
 fullnameOverride: ''
@@ -49,10 +49,6 @@ env:
   IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
   IPFS_TIMEOUT: 30s
   DIMO_REGISTRY_CHAIN_ID: '80002'
-# Postgres challenge store. When enabled, dauth reads DATABASE_URL from the
-# ExternalSecret (provision <namespace>/dauth/database_url in AWS Secrets
-# Manager) and can run multiple replicas; left disabled it uses the
-# single-replica in-memory store.
 postgres:
   enabled: false
 ports:
