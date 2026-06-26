@@ -323,8 +323,7 @@ ops listeners are shared with the sign-in surface (`HTTP_ADDRESS`, `OPS_ADDRESS`
   store (`postgres.enabled` in the chart, or set `DATABASE_URL`): challenges
   become shared across pods (single-use
   enforced by an atomic `DELETE ... RETURNING`), and you can raise the replica
-  count. The schema self-applies at startup; `migrations/` mirrors it for
-  out-of-band management.
+  count. The schema self-applies at startup, so no migration step is needed.
 - Downstream consumers of the **permission** token point their JWKS URL at
   `…/exchange/keys`; consumers validating the **sign-in** token point at
   `…/siwe/keys`. The exchange validates the inbound sign-in token in-process, so
