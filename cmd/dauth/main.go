@@ -174,12 +174,13 @@ func buildSIWE(ctx context.Context, cfg config.Config, keys *keyset.KeySet, log 
 			Audience: cfg.Audience,
 			TTL:      cfg.TokenTTL,
 		}),
-		Domain:       cfg.Domain,
-		URI:          cfg.PublicBaseURL,
-		Statement:    cfg.Statement,
-		ChainID:      cfg.ChainID,
-		ChallengeTTL: cfg.ChallengeTTL,
-		Log:          log,
+		Domain:           cfg.Domain,
+		URI:              cfg.PublicBaseURL,
+		Statement:        cfg.Statement,
+		ChainID:          cfg.ChainID,
+		ChallengeTTL:     cfg.ChallengeTTL,
+		AllowedAudiences: cfg.AllowedAudiences,
+		Log:              log,
 	}
 
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{

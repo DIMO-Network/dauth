@@ -50,9 +50,9 @@ func NewPostgres(ctx context.Context, db *pgxpool.Pool, log zerolog.Logger) (*Po
 // store unavailable.
 func (p *Postgres) Put(ctx context.Context, id string, ch Challenge) error {
 	_, err := p.db.Exec(ctx,
-		`INSERT INTO nonce_challenges (nonce, message, address, expires_at)
-		 VALUES ($1, $2, $3, $4)`,
-		id, ch.Message, ch.Address.Bytes(), ch.ExpiresAt)
+		`INSERT INTO nonce_challenges (nonce, message, address, expires_at, audience)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		id, ch.Message, ch.Address.Bytes(), ch.ExpiresAt, ch.Audience)
 	if err != nil {
 		return fmt.Errorf("storing challenge: %w", err)
 	}
@@ -68,11 +68,12 @@ func (p *Postgres) Consume(ctx context.Context, id string) (Challenge, error) {
 		msg     string
 		addr    []byte
 		expires time.Time
+		aud     []string
 	)
 	err := p.db.QueryRow(ctx,
 		`DELETE FROM nonce_challenges WHERE nonce = $1
-		 RETURNING message, address, expires_at`, id).
-		Scan(&msg, &addr, &expires)
+		 RETURNING message, address, expires_at, audience`, id).
+		Scan(&msg, &addr, &expires, &aud)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Challenge{}, ErrNotFound
@@ -86,6 +87,7 @@ func (p *Postgres) Consume(ctx context.Context, id string) (Challenge, error) {
 		Message:   msg,
 		Address:   common.BytesToAddress(addr),
 		ExpiresAt: expires,
+		Audience:  aud,
 	}, nil
 }
 

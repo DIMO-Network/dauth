@@ -137,6 +137,106 @@ func TestFullFlow_Success(t *testing.T) {
 	assert.Equal(t, e.addr.Hex(), claims.Subject)
 }
 
+// tokenClaims runs challenge → sign → token and returns the validated claims of
+// the issued token. challengeBody is posted to /challenge as-is so callers can
+// include an `audience`.
+func (e *testEnv) tokenClaims(t *testing.T, challengeBody map[string]any) token.Claims {
+	t.Helper()
+	resp, body := e.post(t, "/challenge", challengeBody)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	challenge := body["challenge"].(string)
+	nonce := body["nonce"].(string)
+
+	resp, body = e.post(t, "/token", map[string]any{"nonce": nonce, "signature": e.sign(t, challenge)})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	tokenStr := body["token"].(string)
+	require.NotEmpty(t, tokenStr)
+
+	var claims token.Claims
+	_, err := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(tokenStr, &claims, func(*jwt.Token) (any, error) { return e.jwksPublicKey(t), nil })
+	require.NoError(t, err)
+	return claims
+}
+
+// TestChallenge_DefaultAudience: omitting `audience` yields the configured
+// default, unchanged from before this feature.
+func TestChallenge_DefaultAudience(t *testing.T) {
+	e := newTestEnv(t)
+	defer e.ts.Close()
+	claims := e.tokenClaims(t, map[string]any{"address": e.addr.Hex()})
+	assert.Equal(t, jwt.ClaimStrings{"dimo"}, claims.Audience)
+}
+
+// TestChallenge_AllowListedAudience: an allow-listed override is honored and the
+// token's `aud` reflects exactly the requested value.
+func TestChallenge_AllowListedAudience(t *testing.T) {
+	e := newTestEnv(t)
+	defer e.ts.Close()
+	e.handlers.AllowedAudiences = []string{"step-ca", "other"}
+
+	claims := e.tokenClaims(t, map[string]any{"address": e.addr.Hex(), "audience": []string{"step-ca"}})
+	assert.Equal(t, jwt.ClaimStrings{"step-ca"}, claims.Audience)
+}
+
+// TestChallenge_RejectedAudience: a non-allow-listed audience returns 400 and
+// does NOT create a usable nonce — the returned nonce is empty/absent.
+func TestChallenge_RejectedAudience(t *testing.T) {
+	e := newTestEnv(t)
+	defer e.ts.Close()
+	e.handlers.AllowedAudiences = []string{"step-ca"}
+
+	resp, body := e.post(t, "/challenge", map[string]any{"address": e.addr.Hex(), "audience": []string{"evil"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "invalid_request", body["error"])
+	_, ok := body["nonce"]
+	assert.False(t, ok, "a rejected challenge must not return a nonce")
+}
+
+// TestChallenge_RejectedWhenNoAllowList: with no allow-list configured, any
+// requested audience is rejected; the default (omitted) path still works.
+func TestChallenge_RejectedWhenNoAllowList(t *testing.T) {
+	e := newTestEnv(t)
+	defer e.ts.Close()
+	// e.handlers.AllowedAudiences is nil by default.
+	resp, body := e.post(t, "/challenge", map[string]any{"address": e.addr.Hex(), "audience": []string{"step-ca"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "invalid_request", body["error"])
+}
+
+// TestChallenge_AudienceBoundAtChallengeTime: the audience is fixed when the
+// nonce is created. The /token endpoint takes only a nonce + signature, so a
+// caller cannot swap the audience there — the issued `aud` is whatever was bound
+// at /challenge regardless of what /token carries.
+func TestChallenge_AudienceBoundAtChallengeTime(t *testing.T) {
+	e := newTestEnv(t)
+	defer e.ts.Close()
+	e.handlers.AllowedAudiences = []string{"step-ca"}
+
+	resp, body := e.post(t, "/challenge", map[string]any{"address": e.addr.Hex(), "audience": []string{"step-ca"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	challenge := body["challenge"].(string)
+	nonce := body["nonce"].(string)
+
+	// An attempt to pass an audience at /token is rejected outright (unknown
+	// field), so the bound audience cannot be overridden post-challenge.
+	resp, body = e.post(t, "/token", map[string]any{
+		"nonce": nonce, "signature": e.sign(t, challenge), "audience": []string{"dimo"},
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "invalid_request", body["error"])
+
+	// The original nonce is still valid (the bad /token request never consumed
+	// it), and redeeming it normally yields the audience bound at challenge time.
+	resp, body = e.post(t, "/token", map[string]any{"nonce": nonce, "signature": e.sign(t, challenge)})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var claims token.Claims
+	_, err := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(body["token"].(string), &claims, func(*jwt.Token) (any, error) { return e.jwksPublicKey(t), nil })
+	require.NoError(t, err)
+	assert.Equal(t, jwt.ClaimStrings{"step-ca"}, claims.Audience)
+}
+
 func TestFullFlow_ReusedNonceRejected(t *testing.T) {
 	e := newTestEnv(t)
 	defer e.ts.Close()

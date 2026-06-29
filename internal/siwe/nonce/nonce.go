@@ -25,6 +25,10 @@ type Challenge struct {
 	Message   string         // canonical EIP-4361 string the wallet signs
 	Address   common.Address // account that must sign Message
 	ExpiresAt time.Time      // absolute expiry
+	// Audience is the `aud` to stamp on the issued token, bound here at
+	// challenge time so it cannot be swapped at /token time. Empty means the
+	// issuer's configured default audience.
+	Audience []string
 }
 
 // Store records and atomically consumes challenges, keyed by nonce. The two

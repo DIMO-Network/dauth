@@ -82,7 +82,16 @@ is stateless and offline-verifiable.
 ```json
 { "address": "0x6E4…A1b" }
 ```
-The chain is fixed by the `CHAIN_ID` config. Response:
+The chain is fixed by the `CHAIN_ID` config.
+
+An optional `audience` (string array) requests a specific `aud` for the issued
+token, e.g. `{ "address": "0x6E4…A1b", "audience": ["step-ca"] }`. Every value
+must be on the `SIWE_ALLOWED_AUDIENCES` allow-list, or the challenge is rejected
+with `invalid_request` (400). The audience is bound to the nonce at challenge
+time and cannot be changed at `/siwe/token`. Omit it to receive the configured
+default (`JWT_AUDIENCE`). This unblocks clients — e.g. step-ca certificate
+enrollment — that validate the sign-in token as an `id_token` and require their
+own client ID in `aud`. Response:
 ```json
 {
   "challenge": "dauth.dimo.zone wants you to sign in with your Ethereum account:\n0x6E4…A1b\n\nSign in to DIMO.\n\nURI: https://dauth.dimo.zone\nVersion: 1\nChain ID: 137\nNonce: …\nIssued At: …\nExpiration Time: …",
@@ -125,7 +134,7 @@ RS256, with `kid` in the header. Claims:
 |-------|-------|
 | `iss` | configured issuer |
 | `sub` | EIP-55 checksummed address |
-| `aud` | configured audience(s) |
+| `aud` | configured audience(s), or an allow-listed value requested at `/siwe/challenge` (see below) |
 | `iat` / `nbf` / `exp` | now / now / now + `TOKEN_TTL` |
 | `jti` | random UUID |
 | `ethereum_address` | EIP-55 checksummed address |
@@ -165,7 +174,8 @@ section); a few process-wide variables (`PUBLIC_BASE_URL`, `HTTP_ADDRESS`,
 |----------|----------|---------|-------|
 | `PUBLIC_BASE_URL` | yes | — | Externally reachable origin, e.g. `https://dauth.dimo.zone`. Base of each surface's `jwks_uri`; also the SIWE `uri` and default `SIWE_DOMAIN` host. |
 | `SIWE_ISSUER` | yes | — | Absolute URL, e.g. `https://dauth.dimo.zone/siwe`. The sign-in JWT `iss`. |
-| `JWT_AUDIENCE` | yes | — | Comma-separated `aud` value(s). |
+| `JWT_AUDIENCE` | yes | — | Comma-separated default `aud` value(s). |
+| `SIWE_ALLOWED_AUDIENCES` | no | — | Comma-separated allow-list of `aud` values a caller may request at `/siwe/challenge`. Empty means no override is permitted. |
 | `SIWE_SIGNING_KEY_1`, `SIWE_SIGNING_KEY_2`, … | yes | — | PEM RSA private keys, in order. `_1` is the active signer. |
 | `CHAIN_ID` | no | `137` | Chain the sign-in is bound to (in the SIWE message). |
 | `SIWE_DOMAIN` | no | `PUBLIC_BASE_URL` host | Domain shown in the SIWE message. |
