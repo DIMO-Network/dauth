@@ -28,6 +28,12 @@ type Handlers struct {
 	ChainID      uint64 // chain the sign-in is bound to
 	ChallengeTTL time.Duration
 
+	// AllowedAudiences is the allow-list of non-default `aud` values a caller may
+	// request on POST /challenge. A requested audience is honored only if every
+	// value is in this list; empty means no override is permitted. When a caller
+	// omits `audience`, the issuer's configured default audience is used.
+	AllowedAudiences []string
+
 	Log zerolog.Logger
 	Now func() time.Time // injectable clock; nil uses time.Now
 }
@@ -41,6 +47,10 @@ func (h *Handlers) now() time.Time {
 
 type challengeRequest struct {
 	Address string `json:"address" example:"0x6E4...A1b"`
+	// Audience optionally requests a specific `aud` for the issued token. Every
+	// value must be on the server's allow-list (SIWE_ALLOWED_AUDIENCES) or the
+	// challenge is rejected. Omit it to receive the configured default audience.
+	Audience []string `json:"audience,omitempty" example:"step-ca"`
 }
 
 type challengeResponse struct {
@@ -100,6 +110,16 @@ func (h *Handlers) Challenge() http.Handler {
 			return
 		}
 
+		// Validate any requested audience against the allow-list and bind it to
+		// the nonce now, so the `aud` is fixed at challenge time and cannot be
+		// swapped at /token. An empty Audience falls through to the issuer's
+		// default. Reject before a nonce is created so a disallowed request never
+		// yields a usable challenge.
+		if !h.audienceAllowed(req.Audience) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "requested audience is not allowed")
+			return
+		}
+
 		id, err := nonce.New()
 		if err != nil {
 			h.Log.Error().Err(err).Msg("generating nonce")
@@ -125,6 +145,7 @@ func (h *Handlers) Challenge() http.Handler {
 			Message:   msg,
 			Address:   addr,
 			ExpiresAt: expiresAt,
+			Audience:  req.Audience,
 		}); err != nil {
 			h.Log.Warn().Err(err).Msg("storing challenge")
 			writeError(w, http.StatusServiceUnavailable, "server_error", "challenge store unavailable, retry shortly")
@@ -199,7 +220,7 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 
-		tok, _, err := h.Issuer.Issue(ch.Address)
+		tok, _, err := h.Issuer.Issue(ch.Address, ch.Audience)
 		if err != nil {
 			h.Log.Error().Err(err).Msg("issuing token")
 			writeError(w, http.StatusInternalServerError, "server_error", "could not issue token")
@@ -212,6 +233,29 @@ func (h *Handlers) Token() http.Handler {
 			ExpiresIn: int(h.Issuer.TTL().Seconds()),
 		})
 	})
+}
+
+// audienceAllowed reports whether a requested audience may be honored. An empty
+// request is always allowed (the issuer falls back to its default audience); a
+// non-empty request is allowed only if every value appears on the configured
+// allow-list. With no allow-list configured, only the empty (default) request
+// passes.
+func (h *Handlers) audienceAllowed(requested []string) bool {
+	for _, want := range requested {
+		if !contains(h.AllowedAudiences, want) {
+			return false
+		}
+	}
+	return true
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeJSON(r *http.Request, v any) error {

@@ -5,6 +5,16 @@ definitions:
       address:
         example: 0x6E4...A1b
         type: string
+      audience:
+        description: |-
+          Audience optionally requests a specific `aud` for the issued token. Every
+          value must be on the server's allow-list (SIWE_ALLOWED_AUDIENCES) or the
+          challenge is rejected. Omit it to receive the configured default audience.
+        example:
+        - step-ca
+        items:
+          type: string
+        type: array
     type: object
   server.challengeResponse:
     properties:

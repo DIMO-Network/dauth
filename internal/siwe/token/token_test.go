@@ -42,7 +42,7 @@ func TestIssueRoundTrip(t *testing.T) {
 	})
 
 	addr := common.HexToAddress("0x07b584f6a7125491c991ca2a45ab9e641b1cee1b")
-	signed, exp, err := iss.Issue(addr)
+	signed, exp, err := iss.Issue(addr, nil)
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(10*time.Minute), exp)
 
@@ -72,13 +72,49 @@ func TestIssue_RejectedAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	iss := NewIssuer(Config{Keys: ks, Issuer: "iss", Audience: []string{"a"}, TTL: time.Minute, Now: func() time.Time { return now }})
-	signed, _, err := iss.Issue(common.HexToAddress("0x01"))
+	signed, _, err := iss.Issue(common.HexToAddress("0x01"), nil)
 	require.NoError(t, err)
 
 	pub := firstJWKSPublicKey(t, jwksRaw)
 	_, err = jwt.NewParser(jwt.WithTimeFunc(func() time.Time { return now.Add(2 * time.Minute) })).
 		Parse(signed, func(*jwt.Token) (any, error) { return pub, nil })
 	require.Error(t, err, "an expired token must fail validation")
+}
+
+// TestIssue_AudienceOverride confirms a per-issuance audience replaces the
+// issuer's configured default, while a nil/empty override falls back to it.
+func TestIssue_AudienceOverride(t *testing.T) {
+	ks := newTestKeySet(t)
+	jwksRaw, err := ks.JWKS()
+	require.NoError(t, err)
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	iss := NewIssuer(Config{
+		Keys:     ks,
+		Issuer:   "https://auth.dimo.zone",
+		Audience: []string{"dimo"},
+		TTL:      10 * time.Minute,
+		Now:      func() time.Time { return now },
+	})
+	addr := common.HexToAddress("0x07b584f6a7125491c991ca2a45ab9e641b1cee1b")
+	pub := firstJWKSPublicKey(t, jwksRaw)
+
+	// Override wins.
+	signed, _, err := iss.Issue(addr, []string{"step-ca"})
+	require.NoError(t, err)
+	var claims Claims
+	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithTimeFunc(func() time.Time { return now.Add(time.Minute) })).
+		ParseWithClaims(signed, &claims, func(*jwt.Token) (any, error) { return pub, nil })
+	require.NoError(t, err)
+	assert.Equal(t, jwt.ClaimStrings{"step-ca"}, claims.Audience)
+
+	// Empty override falls back to the configured default.
+	signed, _, err = iss.Issue(addr, nil)
+	require.NoError(t, err)
+	claims = Claims{}
+	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithTimeFunc(func() time.Time { return now.Add(time.Minute) })).
+		ParseWithClaims(signed, &claims, func(*jwt.Token) (any, error) { return pub, nil })
+	require.NoError(t, err)
+	assert.Equal(t, jwt.ClaimStrings{"dimo"}, claims.Audience)
 }
 
 // firstJWKSPublicKey reconstructs an *rsa.PublicKey from the first JWKS entry so

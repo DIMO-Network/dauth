@@ -36,8 +36,18 @@ type Config struct {
 	// Token / issuer identity for the sign-in (/siwe) surface.
 	Issuer    string   // SIWE_ISSUER (e.g. https://dauth.dimo.zone/siwe) — required
 	Domain    string   // SIWE_DOMAIN host; defaults to the PublicBaseURL host
-	Audience  []string // JWT_AUDIENCE (comma-separated) — required
+	Audience  []string // JWT_AUDIENCE (comma-separated) — required; the default aud
 	Statement string   // SIWE_STATEMENT shown in the wallet prompt
+
+	// AllowedAudiences is the allow-list of non-default `aud` values a caller may
+	// request at /siwe/challenge (SIWE_ALLOWED_AUDIENCES, comma-separated). A
+	// requested audience is honored only if every value appears here; otherwise
+	// the challenge is rejected. Empty (the default) means no override is
+	// permitted and every token carries the configured Audience. This exists to
+	// let specific clients — e.g. step-ca cert enrollment, which validates the
+	// sign-in token as an id_token and requires its own clientID in `aud` — mint
+	// a sign-in token they can consume, without changing the default.
+	AllowedAudiences []string // SIWE_ALLOWED_AUDIENCES (comma-separated) — optional
 
 	// Chain the sign-in is bound to — the Chain ID in the SIWE message. DIMO
 	// runs on a single chain, so this is one value, not a per-request field.
@@ -72,16 +82,17 @@ func (s Config) UsePostgres() bool { return s.DatabaseURL != "" }
 // required value is missing or malformed.
 func Load() (Config, error) {
 	s := Config{
-		Environment:   envx.String("ENVIRONMENT", "dev"),
-		LogLevel:      envx.String("LOG_LEVEL", "info"),
-		HTTPAddr:      envx.String("HTTP_ADDRESS", "0.0.0.0:8080"),
-		OpsAddr:       envx.String("OPS_ADDRESS", "0.0.0.0:8081"),
-		PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
-		Issuer:        os.Getenv("SIWE_ISSUER"),
-		Domain:        os.Getenv("SIWE_DOMAIN"),
-		Statement:     envx.String("SIWE_STATEMENT", "Sign in to DIMO."),
-		RPCURL:        os.Getenv("RPC_URL"),
-		Audience:      envx.List(os.Getenv("JWT_AUDIENCE")),
+		Environment:      envx.String("ENVIRONMENT", "dev"),
+		LogLevel:         envx.String("LOG_LEVEL", "info"),
+		HTTPAddr:         envx.String("HTTP_ADDRESS", "0.0.0.0:8080"),
+		OpsAddr:          envx.String("OPS_ADDRESS", "0.0.0.0:8081"),
+		PublicBaseURL:    os.Getenv("PUBLIC_BASE_URL"),
+		Issuer:           os.Getenv("SIWE_ISSUER"),
+		Domain:           os.Getenv("SIWE_DOMAIN"),
+		Statement:        envx.String("SIWE_STATEMENT", "Sign in to DIMO."),
+		RPCURL:           os.Getenv("RPC_URL"),
+		Audience:         envx.List(os.Getenv("JWT_AUDIENCE")),
+		AllowedAudiences: envx.List(os.Getenv("SIWE_ALLOWED_AUDIENCES")),
 	}
 
 	if s.Issuer == "" {

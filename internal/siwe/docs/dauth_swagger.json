@@ -132,6 +132,16 @@
                 "address": {
                     "type": "string",
                     "example": "0x6E4...A1b"
+                },
+                "audience": {
+                    "description": "Audience optionally requests a specific `aud` for the issued token. Every\nvalue must be on the server's allow-list (SIWE_ALLOWED_AUDIENCES) or the\nchallenge is rejected. Omit it to receive the configured default audience.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "step-ca"
+                    ]
                 }
             }
         },

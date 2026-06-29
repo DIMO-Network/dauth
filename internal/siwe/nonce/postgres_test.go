@@ -44,6 +44,7 @@ func TestPostgres_PutConsume(t *testing.T) {
 		Message:   "canonical siwe message",
 		Address:   common.HexToAddress("0xc0ffee254729296a45a3885639AC7E10F9d54979"),
 		ExpiresAt: time.Now().Add(time.Minute).UTC().Truncate(time.Microsecond),
+		Audience:  []string{"step-ca"},
 	}
 	require.NoError(t, p.Put(ctx, "nonce-1", ch))
 
@@ -52,6 +53,7 @@ func TestPostgres_PutConsume(t *testing.T) {
 	assert.Equal(t, ch.Address, got.Address)
 	assert.Equal(t, ch.Message, got.Message)
 	assert.True(t, ch.ExpiresAt.Equal(got.ExpiresAt))
+	assert.Equal(t, ch.Audience, got.Audience)
 }
 
 func TestPostgres_SingleUse(t *testing.T) {

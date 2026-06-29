@@ -57,17 +57,27 @@ func NewIssuer(cfg Config) *Issuer {
 // Issue mints a signed access token for account. The subject and
 // ethereum_address claim are the EIP-55 checksummed address. It returns the
 // signed token and its expiry time.
-func (i *Issuer) Issue(account common.Address) (string, time.Time, error) {
+//
+// audience overrides the `aud` claim for this token; when empty the issuer's
+// configured default audience is used. The caller is responsible for having
+// validated any non-default audience against its allow-list — Issue trusts what
+// it is given.
+func (i *Issuer) Issue(account common.Address, audience []string) (string, time.Time, error) {
 	now := i.now().UTC()
 	exp := now.Add(i.ttl)
 	addr := account.Hex()
+
+	aud := i.audience
+	if len(audience) > 0 {
+		aud = jwt.ClaimStrings(audience)
+	}
 
 	claims := Claims{
 		EthereumAddress: addr,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    i.issuer,
 			Subject:   addr,
-			Audience:  i.audience,
+			Audience:  aud,
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(exp),
