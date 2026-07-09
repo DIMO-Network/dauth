@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dauth/internal/exchange/autheval"
@@ -123,6 +124,11 @@ func (s *Service) ValidateAccessViaSourceDoc(ctx context.Context, accessReq *Acc
 }
 
 func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEvent, accessReq *AccessRequest, grantee common.Address) error {
+	// New-style grants carry an ODRL Agreement and dispatch on the CloudEvent
+	// envelope type; everything below is the legacy SACDData format.
+	if record.Type == models.TypeSACDODRL {
+		return s.evaluateODRLDoc(ctx, record, accessReq, grantee)
+	}
 	var data models.SACDData
 	if err := json.Unmarshal(record.Data, &data); err != nil {
 		return richerrors.Error{
@@ -176,6 +182,86 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 	}
 
 	if lacks := autheval.EvaluatePermissions(userPermGrants, accessReq.Permissions); len(lacks) > 0 {
+		return missingPermissionsError(grantee, accessReq.Asset, lacks)
+	}
+	return nil
+}
+
+// evaluateODRLDoc evaluates a new-style SACD grant: an ODRL Agreement
+// restricted to DIMO profile v1. The profile covers exactly the capabilities
+// of legacy permission grants — assigner, assignee, target asset, a validity
+// period, and named permissions — so the outcome is indistinguishable from a
+// legacy doc granting the same permissions. CloudEvent-scoped access is not
+// part of profile v1 and any such request is refused.
+func (s *Service) evaluateODRLDoc(ctx context.Context, record *cloudevent.RawEvent, accessReq *AccessRequest, grantee common.Address) error {
+	agreement, err := models.ParseODRLAgreement(record.Data)
+	if err != nil {
+		return richerrors.Error{
+			Code:        http.StatusBadRequest,
+			Err:         err,
+			ExternalMsg: "failed to parse ODRL agreement",
+		}
+	}
+
+	assignee, err := cloudevent.DecodeEthrDID(agreement.Assignee)
+	if err != nil {
+		return richerrors.Error{
+			Code:        http.StatusBadRequest,
+			Err:         err,
+			ExternalMsg: "assignee must be an ethr DID",
+		}
+	}
+	if assignee.ContractAddress != grantee {
+		return richerrors.Error{
+			Code:        http.StatusForbidden,
+			ExternalMsg: "Assignee in agreement doesn't match requester",
+		}
+	}
+
+	assigner, err := cloudevent.DecodeEthrDID(agreement.Assigner)
+	if err != nil {
+		return richerrors.Error{
+			Code:        http.StatusBadRequest,
+			Err:         err,
+			ExternalMsg: "assigner must be an ethr DID",
+		}
+	}
+	valid, err := s.sigValidator.ValidateSignature(ctx, record.Data, record.Signature, assigner.ContractAddress)
+	if err != nil {
+		if richerrors.IsRichError(err) {
+			return fmt.Errorf("failed to validate grant signature: %w", err)
+		}
+		return richerrors.Error{
+			Code:        http.StatusInternalServerError,
+			Err:         err,
+			ExternalMsg: "failed to validate grant signature",
+		}
+	}
+	if !valid {
+		return richerrors.Error{
+			Code:        http.StatusForbidden,
+			ExternalMsg: "invalid grant signature",
+		}
+	}
+
+	// Profile v1 grants no CloudEvent access, so a request for any is refused
+	// rather than partially serviced.
+	if len(accessReq.EventFilters) != 0 {
+		return richerrors.Error{
+			Code:        http.StatusForbidden,
+			ExternalMsg: "agreement grants no CloudEvent access",
+		}
+	}
+
+	grants, err := autheval.ODRLGrantMap(agreement, accessReq.Asset, time.Now())
+	if err != nil {
+		return richerrors.Error{
+			Code:        http.StatusForbidden,
+			Err:         err,
+			ExternalMsg: "agreement does not authorize this request",
+		}
+	}
+	if lacks := autheval.EvaluatePermissions(grants, accessReq.Permissions); len(lacks) > 0 {
 		return missingPermissionsError(grantee, accessReq.Asset, lacks)
 	}
 	return nil
