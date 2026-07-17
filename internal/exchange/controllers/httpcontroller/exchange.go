@@ -25,7 +25,7 @@ type TokenSigner interface {
 	SignPrivilegePayload(ctx context.Context, req services.PrivilegeTokenDTO) (string, error)
 }
 type AccessService interface {
-	ValidateAccess(ctx context.Context, req *access.AccessRequest, ethAddr common.Address) error
+	ValidateAccess(ctx context.Context, req *access.AccessRequest, ethAddr common.Address) (*access.Decision, error)
 }
 
 var defaultAudience = []string{"dimo.zone"}
@@ -115,16 +115,17 @@ func (t *ExchangeController) ExchangeToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := t.accessService.ValidateAccess(r.Context(), accessReq, ethAddr); err != nil {
+	decision, err := t.accessService.ValidateAccess(r.Context(), accessReq, ethAddr)
+	if err != nil {
 		writeError(r.Context(), w, fmt.Errorf("failed to validate access: %w", err))
 		return
 	}
 
-	t.createAndReturnToken(w, r, tokenReq.Audience, accessReq)
+	t.createAndReturnToken(w, r, tokenReq.Audience, accessReq, decision)
 }
 
 // createAndReturnToken signs the permission token and writes it to the response.
-func (t *ExchangeController) createAndReturnToken(w http.ResponseWriter, r *http.Request, aud []string, accessReq *access.AccessRequest) {
+func (t *ExchangeController) createAndReturnToken(w http.ResponseWriter, r *http.Request, aud []string, accessReq *access.AccessRequest, decision *access.Decision) {
 	if len(aud) == 0 {
 		aud = defaultAudience
 	}
@@ -137,6 +138,7 @@ func (t *ExchangeController) createAndReturnToken(w http.ResponseWriter, r *http
 
 	tk, err := t.signer.SignPrivilegePayload(r.Context(), services.PrivilegeTokenDTO{
 		AccessRequest:   accessReq,
+		Decision:        decision,
 		Audience:        aud,
 		ResponseSubject: respSub,
 	})

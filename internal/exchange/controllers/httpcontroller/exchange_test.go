@@ -88,7 +88,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 					},
 					Permissions: []string{tokenclaims.PrivilegeIDToName[4]},
-				}, userEthAddr).Return(nil)
+				}, userEthAddr).Return(&access.Decision{}, nil)
 				signer.EXPECT().SignPrivilegePayload(gomock.Any(), services.PrivilegeTokenDTO{
 					AccessRequest: &access.AccessRequest{
 						Asset: models.ERC721Asset{
@@ -100,6 +100,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 						Permissions: []string{tokenclaims.PrivilegeIDToName[4]},
 					},
+					Decision:        &access.Decision{},
 					Audience:        defaultAudience,
 					ResponseSubject: userEthAddr.Hex(),
 				}).Return("jwt", nil)
@@ -130,7 +131,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 					},
 					Permissions: []string{tokenclaims.PrivilegeIDToName[4]},
-				}, devLicenseAddr).Return(nil)
+				}, devLicenseAddr).Return(&access.Decision{}, nil)
 				signer.EXPECT().SignPrivilegePayload(gomock.Any(), services.PrivilegeTokenDTO{
 					AccessRequest: &access.AccessRequest{
 						Asset: models.ERC721Asset{
@@ -142,6 +143,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 						Permissions: []string{tokenclaims.PrivilegeIDToName[4]},
 					},
+					Decision:        &access.Decision{},
 					Audience:        defaultAudience,
 					ResponseSubject: devLicenseAddr.Hex(),
 				}).Return("jwt", nil)
@@ -172,7 +174,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 					},
 					Permissions: []string{tokenclaims.ManufacturerPrivilegeIDToName[6]},
-				}, devLicenseAddr).Return(nil)
+				}, devLicenseAddr).Return(&access.Decision{}, nil)
 				signer.EXPECT().SignPrivilegePayload(gomock.Any(), services.PrivilegeTokenDTO{
 					AccessRequest: &access.AccessRequest{
 						Asset: models.ERC721Asset{
@@ -184,6 +186,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 						Permissions: []string{tokenclaims.ManufacturerPrivilegeIDToName[6]},
 					},
+					Decision:        &access.Decision{},
 					Audience:        defaultAudience,
 					ResponseSubject: devLicenseAddr.Hex(),
 				}).Return("jwt", nil)
@@ -214,7 +217,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 					},
 					Permissions: []string{tokenclaims.PrivilegeIDToName[1], tokenclaims.PrivilegeIDToName[2], tokenclaims.PrivilegeIDToName[4], tokenclaims.PrivilegeIDToName[5]},
-				}, userEthAddr).Return(nil)
+				}, userEthAddr).Return(&access.Decision{}, nil)
 				signer.EXPECT().SignPrivilegePayload(gomock.Any(), services.PrivilegeTokenDTO{
 					AccessRequest: &access.AccessRequest{
 						Asset: models.ERC721Asset{
@@ -226,6 +229,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 						Permissions: []string{tokenclaims.PrivilegeIDToName[1], tokenclaims.PrivilegeIDToName[2], tokenclaims.PrivilegeIDToName[4], tokenclaims.PrivilegeIDToName[5]},
 					},
+					Decision:        &access.Decision{},
 					Audience:        defaultAudience,
 					ResponseSubject: userEthAddr.Hex(),
 				}).Return("jwt", nil)
@@ -273,7 +277,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 					},
 					Permissions: []string{tokenclaims.PrivilegeIDToName[4]},
-				}, userEthAddr).Return(nil)
+				}, userEthAddr).Return(&access.Decision{}, nil)
 				signer.EXPECT().SignPrivilegePayload(gomock.Any(), services.PrivilegeTokenDTO{
 					AccessRequest: &access.AccessRequest{
 						Asset: models.ERC721Asset{
@@ -285,6 +289,7 @@ func TestExchangeController_ExchangeToken(t *testing.T) {
 						},
 						Permissions: []string{tokenclaims.PrivilegeIDToName[4]},
 					},
+					Decision:        &access.Decision{},
 					Audience:        []string{"my-app", "foo"},
 					ResponseSubject: userEthAddr.Hex(),
 				}).Return("jwt", nil)

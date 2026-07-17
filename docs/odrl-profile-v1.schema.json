@@ -66,6 +66,20 @@
             "type": "string",
             "pattern": "^privilege:[A-Za-z]+$",
             "description": "A DIMO permission name from the profile's closed action vocabulary."
+          },
+          "constraint": {
+            "type": "array",
+            "description": "Data window as conjunctive dimo:recordedAt comparisons: the permission covers only data points recorded within the window. Absent means all time.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["leftOperand", "operator", "rightOperand"],
+              "properties": {
+                "leftOperand": { "const": "dimo:recordedAt" },
+                "operator": { "enum": ["gteq", "gt", "lteq", "lt"] },
+                "rightOperand": { "type": "string", "format": "date-time" }
+              }
+            }
           }
         }
       }

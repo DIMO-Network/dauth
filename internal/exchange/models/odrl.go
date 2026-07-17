@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 )
 
 // This file defines DIMO ODRL profile v1, the new-style SACD grant format.
@@ -39,14 +41,14 @@ const (
 	odrlLeftOperandDateTime = "dateTime"
 )
 
-// odrlOperators are the constraint operators profile v1 accepts, all over the
-// dateTime left operand: gteq/gt bound the start of the validity period,
-// lteq/lt bound the end.
+// odrlOperators are the constraint operators profile v1 accepts: gteq/gt
+// bound the start of a period, lteq/lt the end. The names are shared with the
+// token-claims constraint vocabulary.
 var odrlOperators = map[string]struct{}{
-	"gteq": {},
-	"gt":   {},
-	"lteq": {},
-	"lt":   {},
+	tokenclaims.OperatorGteq: {},
+	tokenclaims.OperatorGt:   {},
+	tokenclaims.OperatorLteq: {},
+	tokenclaims.OperatorLt:   {},
 }
 
 // ODRLAgreement is an ODRL 2.2 Agreement restricted to DIMO profile v1.
@@ -64,19 +66,23 @@ type ODRLAgreement struct {
 
 // ODRLPermission grants a single action on the agreement's target. Profile v1
 // actions are the existing DIMO permission names (e.g. "privilege:GetRawData");
-// the privilege: prefix is declared by the profile context.
+// the privilege: prefix is declared by the profile context. An optional
+// constraint list narrows the data the action may read: profile v1 defines
+// dimo:recordedAt, bounding the recording timestamps of readable data points.
+// Per-permission constraints are forwarded verbatim into the minted token's
+// scoped_permissions claim; they are enforced by the data services, not here.
 type ODRLPermission struct {
-	Action string `json:"action"`
+	Action     string           `json:"action"`
+	Constraint []ODRLConstraint `json:"constraint,omitempty"`
 }
 
-// ODRLConstraint is an ODRL constraint restricted to profile v1: a dateTime
-// comparison bounding the agreement's validity period. RightOperand is a plain
-// RFC 3339 timestamp, not a JSON-LD @value object.
-type ODRLConstraint struct {
-	LeftOperand  string `json:"leftOperand"`
-	Operator     string `json:"operator"`
-	RightOperand string `json:"rightOperand"`
-}
+// ODRLConstraint is an ODRL constraint atom. At the policy level profile v1
+// accepts only dateTime comparisons bounding the agreement's validity period;
+// on a permission it accepts only dimo:recordedAt comparisons bounding the
+// data window. RightOperand is a plain RFC 3339 timestamp, not a JSON-LD
+// @value object. The type is shared with the token claims so grant documents
+// and minted tokens speak one constraint vocabulary.
+type ODRLConstraint = tokenclaims.Constraint
 
 // ParseODRLAgreement parses and structurally validates a DIMO profile v1
 // agreement. It is strict: unknown fields anywhere in the document are an
@@ -123,17 +129,33 @@ func (a *ODRLAgreement) validate() error {
 		if perm.Action == "" {
 			return fmt.Errorf("permission[%d]: action is required", i)
 		}
+		for j, c := range perm.Constraint {
+			if err := validateODRLConstraint(c, tokenclaims.LeftOperandRecordedAt, fmt.Sprintf("permission[%d].constraint[%d]", i, j)); err != nil {
+				return err
+			}
+		}
 	}
 	for i, c := range a.Constraint {
-		if c.LeftOperand != odrlLeftOperandDateTime {
-			return fmt.Errorf("constraint[%d]: leftOperand must be %q, got %q", i, odrlLeftOperandDateTime, c.LeftOperand)
+		if err := validateODRLConstraint(c, odrlLeftOperandDateTime, fmt.Sprintf("constraint[%d]", i)); err != nil {
+			return err
 		}
-		if _, ok := odrlOperators[c.Operator]; !ok {
-			return fmt.Errorf("constraint[%d]: unsupported operator %q", i, c.Operator)
-		}
-		if _, err := time.Parse(time.RFC3339, c.RightOperand); err != nil {
-			return fmt.Errorf("constraint[%d]: rightOperand must be an RFC 3339 timestamp: %w", i, err)
-		}
+	}
+	return nil
+}
+
+// validateODRLConstraint checks a single constraint atom against the profile
+// vocabulary at its position: policy-level constraints compare dateTime (the
+// grant's validity period), per-permission constraints compare
+// dimo:recordedAt (the data window). Anything else rejects the document.
+func validateODRLConstraint(c ODRLConstraint, wantLeftOperand, path string) error {
+	if c.LeftOperand != wantLeftOperand {
+		return fmt.Errorf("%s: leftOperand must be %q, got %q", path, wantLeftOperand, c.LeftOperand)
+	}
+	if _, ok := odrlOperators[c.Operator]; !ok {
+		return fmt.Errorf("%s: unsupported operator %q", path, c.Operator)
+	}
+	if _, err := time.Parse(time.RFC3339, c.RightOperand); err != nil {
+		return fmt.Errorf("%s: rightOperand must be an RFC 3339 timestamp: %w", path, err)
 	}
 	return nil
 }
@@ -176,13 +198,13 @@ func (a *ODRLAgreement) SatisfiedAt(now time.Time) bool {
 		}
 		var ok bool
 		switch c.Operator {
-		case "gteq":
+		case tokenclaims.OperatorGteq:
 			ok = !now.Before(bound)
-		case "gt":
+		case tokenclaims.OperatorGt:
 			ok = now.After(bound)
-		case "lteq":
+		case tokenclaims.OperatorLteq:
 			ok = !now.After(bound)
-		case "lt":
+		case tokenclaims.OperatorLt:
 			ok = now.Before(bound)
 		}
 		if !ok {

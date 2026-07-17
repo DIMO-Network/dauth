@@ -86,6 +86,9 @@ func TestValidateAccess_ODRL(t *testing.T) {
 		mutate          func(doc map[string]any)
 		sigValid        bool
 		expectedErrCode int
+		// expectScoped is the exact ScopedPermissions the decision must carry;
+		// nil means the decision must be empty (all grants unconditional).
+		expectScoped []tokenclaims.ScopedPermission
 	}{
 		{
 			name:        "grants requested permissions",
@@ -214,6 +217,120 @@ func TestValidateAccess_ODRL(t *testing.T) {
 			sigValid:        true,
 			expectedErrCode: http.StatusBadRequest,
 		},
+		{
+			name:        "recordedAt constraints flow into the decision verbatim",
+			permissions: []string{tokenclaims.PermissionGetLocationHistory},
+			mutate: func(doc map[string]any) {
+				doc["permission"] = []map[string]any{
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dimo:recordedAt", "operator": "gteq", "rightOperand": "2026-04-01T00:00:00Z"},
+							{"leftOperand": "dimo:recordedAt", "operator": "lt", "rightOperand": "2026-07-01T00:00:00Z"},
+						},
+					},
+				}
+			},
+			sigValid: true,
+			expectScoped: []tokenclaims.ScopedPermission{
+				{
+					Name: tokenclaims.PermissionGetLocationHistory,
+					Constraint: []tokenclaims.Constraint{
+						{LeftOperand: "dimo:recordedAt", Operator: "gteq", RightOperand: "2026-04-01T00:00:00Z"},
+						{LeftOperand: "dimo:recordedAt", Operator: "lt", RightOperand: "2026-07-01T00:00:00Z"},
+					},
+				},
+			},
+		},
+		{
+			name: "mixed grant: only the constrained permission is scoped",
+			permissions: []string{
+				tokenclaims.PermissionGetLocationHistory,
+				tokenclaims.PermissionGetNonLocationHistory,
+			},
+			mutate: func(doc map[string]any) {
+				doc["permission"] = []map[string]any{
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dimo:recordedAt", "operator": "gteq", "rightOperand": "2026-04-01T00:00:00Z"},
+						},
+					},
+					{"action": tokenclaims.PermissionGetNonLocationHistory},
+				}
+			},
+			sigValid: true,
+			expectScoped: []tokenclaims.ScopedPermission{
+				{
+					Name: tokenclaims.PermissionGetLocationHistory,
+					Constraint: []tokenclaims.Constraint{
+						{LeftOperand: "dimo:recordedAt", Operator: "gteq", RightOperand: "2026-04-01T00:00:00Z"},
+					},
+				},
+			},
+		},
+		{
+			name:        "per-permission dateTime is not in the profile",
+			permissions: []string{tokenclaims.PermissionGetLocationHistory},
+			mutate: func(doc map[string]any) {
+				doc["permission"] = []map[string]any{
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dateTime", "operator": "gteq", "rightOperand": "2026-04-01T00:00:00Z"},
+						},
+					},
+				}
+			},
+			sigValid:        true,
+			expectedErrCode: http.StatusBadRequest,
+		},
+		{
+			name:        "per-permission constraint with unsupported operator",
+			permissions: []string{tokenclaims.PermissionGetLocationHistory},
+			mutate: func(doc map[string]any) {
+				doc["permission"] = []map[string]any{
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dimo:recordedAt", "operator": "isAnyOf", "rightOperand": "2026-04-01T00:00:00Z"},
+						},
+					},
+				}
+			},
+			sigValid:        true,
+			expectedErrCode: http.StatusBadRequest,
+		},
+		{
+			name:        "per-permission constraint with non-timestamp operand",
+			permissions: []string{tokenclaims.PermissionGetLocationHistory},
+			mutate: func(doc map[string]any) {
+				doc["permission"] = []map[string]any{
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dimo:recordedAt", "operator": "gteq", "rightOperand": "last Tuesday"},
+						},
+					},
+				}
+			},
+			sigValid:        true,
+			expectedErrCode: http.StatusBadRequest,
+		},
+		{
+			name:        "per-permission refinement is still outside the profile",
+			permissions: []string{tokenclaims.PermissionGetLocationHistory},
+			mutate: func(doc map[string]any) {
+				doc["permission"] = []map[string]any{
+					{
+						"action":     tokenclaims.PermissionGetLocationHistory,
+						"refinement": []map[string]any{{"leftOperand": "dimo:recordedAt", "operator": "gteq", "rightOperand": "2026-04-01T00:00:00Z"}},
+					},
+				}
+			},
+			sigValid:        true,
+			expectedErrCode: http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range tests {
@@ -245,7 +362,7 @@ func TestValidateAccess_ODRL(t *testing.T) {
 			// ValidateAccessViaSourceDoc rather than ValidateAccess: the latter
 			// masks doc-path rejections behind the legacy on-chain fallback for
 			// permission-only requests, and the doc path is what's under test.
-			err = accessService.ValidateAccessViaSourceDoc(context.Background(), &AccessRequest{
+			decision, err := accessService.ValidateAccessViaSourceDoc(context.Background(), &AccessRequest{
 				Asset:        odrlAssetDID(),
 				Permissions:  tc.permissions,
 				EventFilters: tc.eventFilters,
@@ -253,6 +370,7 @@ func TestValidateAccess_ODRL(t *testing.T) {
 
 			if tc.expectedErrCode == 0 {
 				require.NoError(t, err)
+				require.Equal(t, tc.expectScoped, decision.ScopedPermissions)
 				return
 			}
 			require.Error(t, err)

@@ -269,7 +269,7 @@ func TestAccessService_ValidateAccess_WithAsset_WithoutTemplateId(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mockSetup(t)
-			err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
+			_, err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
 			if tc.expectedErrCode == 0 {
 				require.NoError(t, err)
 				return
@@ -534,7 +534,7 @@ func TestAccessService_ValidateAccess_WithAsset_WithTemplateId(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mockSetup(t)
-			err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
+			_, err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
 			if tc.expectedErrCode == 0 {
 				require.NoError(t, err)
 				return
@@ -783,7 +783,7 @@ func TestAccessService_ValidateAccess_WithoutAsset_WithoutTemplateId(t *testing.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mockSetup(t)
-			err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
+			_, err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
 			if tc.expectedErrCode == 0 {
 				require.NoError(t, err)
 				return
@@ -1030,7 +1030,7 @@ func TestAccessService_ValidateAccess_WithoutAsset_WithTemplateId(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mockSetup(t)
-			err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
+			_, err := accessService.ValidateAccess(t.Context(), tc.accessRequest, tc.ethAddr)
 			if tc.expectedErrCode == 0 {
 				require.NoError(t, err)
 				return
