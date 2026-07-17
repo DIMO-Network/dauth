@@ -151,4 +151,7 @@ purpose constraints, and further per-permission left operands (e.g.
 geofences), which existing consumers will automatically refuse until taught.
 
 A machine-readable JSON Schema for this profile lives at
-[`odrl-profile-v1.schema.json`](./odrl-profile-v1.schema.json).
+[`odrl-profile-v1.schema.json`](./odrl-profile-v1.schema.json). A design
+draft for the next version — union semantics for duplicate actions and
+CloudEvent-scoped access — lives at
+[`odrl-profile-v2-draft.md`](./odrl-profile-v2-draft.md).
