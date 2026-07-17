@@ -50,7 +50,7 @@ func (s *TokenExchangeServer) AccessCheck(ctx context.Context, req *grpc.AccessC
 	if req.GetGrantee() == "" {
 		return nil, fmt.Errorf("grantee is required")
 	}
-	err = s.accessService.ValidateAccess(ctx, accessReq, common.HexToAddress(req.GetGrantee()))
+	decision, err := s.accessService.ValidateAccess(ctx, accessReq, common.HexToAddress(req.GetGrantee()))
 	if err != nil {
 		richErr, ok := richerrors.AsRichError(err)
 		if !ok {
@@ -66,6 +66,25 @@ func (s *TokenExchangeServer) AccessCheck(ctx context.Context, req *grpc.AccessC
 				Code:        int32(richErr.Code),
 				ExternalMsg: richErr.ExternalMsg,
 				Err:         fmt.Sprintf("%v", richErr.Err),
+			},
+		}, nil
+	}
+
+	// This response cannot express constraints, so a permission granted only
+	// under constraints must not be reported as held: a caller acting on
+	// has_access alone would treat it as unconditional. Fail closed instead.
+	if len(decision.ScopedPermissions) > 0 {
+		names := make([]string, len(decision.ScopedPermissions))
+		for i, sp := range decision.ScopedPermissions {
+			names[i] = sp.Name
+		}
+		reason := fmt.Sprintf("permissions %v are granted only under constraints, which this check cannot convey; use the token exchange", names)
+		return &grpc.AccessCheckResponse{
+			HasAccess: false,
+			Reason:    reason,
+			RichError: &grpc.RichError{
+				Code:        int32(http.StatusForbidden),
+				ExternalMsg: reason,
 			},
 		}, nil
 	}

@@ -2,21 +2,27 @@
 package tokenclaims
 
 import (
-	"github.com/DIMO-Network/dauth/internal/exchange/models"
 	"github.com/DIMO-Network/shared/pkg/privileges"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 // GlobalIdentifier is the global identifier that represents all strings.
-const GlobalIdentifier = models.GlobalIdentifier
+const GlobalIdentifier = "*"
 
 // CustomClaims is the custom claims for the exchange surface's permission tokens.
 type CustomClaims struct {
 	// Asset is the asset DID of the asset that permissions are being requested for currently either did:erc721 or did:ethr
-	Asset       string       `json:"asset"`
+	Asset string `json:"asset"`
+	// Permissions holds the permissions granted unconditionally. A permission
+	// granted under constraints appears in ScopedPermissions instead — never
+	// here — so consumers unaware of a constraint cannot see through it.
 	Permissions []string     `json:"permissions"`
 	CloudEvents *CloudEvents `json:"cloud_events"`
+	// ScopedPermissions holds permissions granted subject to constraint atoms
+	// forwarded from the backing ODRL grant. Consumers must fail closed on
+	// constraints they do not understand.
+	ScopedPermissions []ScopedPermission `json:"scoped_permissions,omitempty"`
 
 	// Deprecated: Use Asset instead.
 	ContractAddress common.Address `json:"contract_address"`
