@@ -318,6 +318,34 @@ func TestValidateAccess_ODRL(t *testing.T) {
 			expectedErrCode: http.StatusBadRequest,
 		},
 		{
+			name:        "duplicate actions are rejected, not partially honored",
+			permissions: []string{tokenclaims.PermissionGetLocationHistory},
+			mutate: func(doc map[string]any) {
+				// The natural ODRL shape for a union of windows ("the last two
+				// weekends") — two independent grants of the same action. v1
+				// defines no union semantics; silently honoring one entry
+				// would be partial honoring, so the document is rejected.
+				doc["permission"] = []map[string]any{
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dimo:recordedAt", "operator": "gteq", "rightOperand": "2026-07-04T00:00:00Z"},
+							{"leftOperand": "dimo:recordedAt", "operator": "lt", "rightOperand": "2026-07-06T00:00:00Z"},
+						},
+					},
+					{
+						"action": tokenclaims.PermissionGetLocationHistory,
+						"constraint": []map[string]any{
+							{"leftOperand": "dimo:recordedAt", "operator": "gteq", "rightOperand": "2026-07-11T00:00:00Z"},
+							{"leftOperand": "dimo:recordedAt", "operator": "lt", "rightOperand": "2026-07-13T00:00:00Z"},
+						},
+					},
+				}
+			},
+			sigValid:        true,
+			expectedErrCode: http.StatusBadRequest,
+		},
+		{
 			name:        "per-permission refinement is still outside the profile",
 			permissions: []string{tokenclaims.PermissionGetLocationHistory},
 			mutate: func(doc map[string]any) {

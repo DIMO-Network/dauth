@@ -57,6 +57,7 @@
     "permission": {
       "type": "array",
       "minItems": 1,
+      "description": "Actions must be unique across entries: duplicate actions (ODRL's union-of-grants shape) are rejected until a profile version defines union semantics. Not expressible in JSON Schema; enforced by the evaluator.",
       "items": {
         "type": "object",
         "additionalProperties": false,

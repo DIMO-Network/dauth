@@ -125,10 +125,19 @@ func (a *ODRLAgreement) validate() error {
 	if len(a.Permission) == 0 {
 		return fmt.Errorf("at least one permission is required")
 	}
+	seenActions := make(map[string]struct{}, len(a.Permission))
 	for i, perm := range a.Permission {
 		if perm.Action == "" {
 			return fmt.Errorf("permission[%d]: action is required", i)
 		}
+		// Under the ODRL model, two permission entries naming the same action
+		// are independent grants — a union. Profile v1 defines no union
+		// semantics, so rather than silently honoring only one entry (partial
+		// honoring, which this profile never does), the document is rejected.
+		if _, dup := seenActions[perm.Action]; dup {
+			return fmt.Errorf("permission[%d]: duplicate action %q; profile v1 defines no union semantics", i, perm.Action)
+		}
+		seenActions[perm.Action] = struct{}{}
 		for j, c := range perm.Constraint {
 			if err := validateODRLConstraint(c, tokenclaims.LeftOperandRecordedAt, fmt.Sprintf("permission[%d].constraint[%d]", i, j)); err != nil {
 				return err

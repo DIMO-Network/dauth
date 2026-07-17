@@ -86,6 +86,11 @@ profile vocabulary is rejected in full — never partially honored. Concretely:
   names (`privilege:GetLocationHistory`, `privilege:GetRawData`, ...). An
   unknown action rejects the whole document so authoring typos fail loudly at
   exchange time rather than silently granting nothing.
+- **Duplicate actions are errors.** Under the ODRL model, two `permission`
+  entries naming the same action are independent grants — a union (e.g. two
+  disjoint data windows). Profile v1 defines no union semantics; rather than
+  silently honoring one entry, the document is rejected. A later version may
+  define the union reading.
 - **Policy-level constraints** are restricted to `leftOperand: "dateTime"`
   with operators `gteq`, `gt`, `lteq`, `lt` and a plain RFC 3339
   `rightOperand` (not a JSON-LD `@value` object). Multiple constraints are
