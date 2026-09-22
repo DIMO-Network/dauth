@@ -18,13 +18,13 @@ type Surface struct {
 }
 
 // NewSurface wires the exchange behind the identity middleware.
-func NewSurface(h *Handler, identity func(http.Handler) http.Handler, wk *oidc.WellKnown) Surface {
+func NewSurface(h *Handler, wk *oidc.WellKnown) Surface {
 	mux := http.NewServeMux()
 	mux.Handle("GET /keys", wk.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", wk.JWKS())
 	mux.Handle("GET /.well-known/openid-configuration", wk.Discovery())
 	return Surface{
-		Exchange:  httpmw.MaxBytes(maxRequestBytes)(identity(h)),
+		Exchange:  httpmw.MaxBytes(maxRequestBytes)(h.Identity.Middleware(h)),
 		WellKnown: mux,
 	}
 }

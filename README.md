@@ -134,12 +134,20 @@ within five minutes). `pkg/dpop.Key.Proof` makes one.
   "grant": "at://did:dimo:avis/network.dimo.delegation/booking1:history",
   "vehicle": "did:dimo:veh…",
   "abilities": ["telemetry:read", "location:precise"],
-  "audience": ["dq"]
+  "audience": ["dq"],
+  "client_assertion": "<identity token for the app's DID>"
 }
 ```
 
+`client_assertion` is optional and names the app the caller is using: an
+identity token from the app's own sign-in, whose `sub` is the app's DID.
+dauth verifies it like the caller's token and passes the DID to the host as
+`clientId`, which is what a delegation's `clientAllowlist` is checked against.
+Without one no client is claimed, and a delegation with an allowlist refuses.
+
 Returns `{ token, token_type: "DPoP", expires_in, expires_at }`. Refusals:
-`invalid_token` (401), `invalid_dpop_proof` (400), `invalid_request` (400),
+`invalid_token` (401), `invalid_client` (401 for a bad assertion, 400 when it
+names the caller), `invalid_dpop_proof` (400), `invalid_request` (400),
 the host's own code (403: `not_covered`, `exclusive_hold` with `suspended`,
 `unauthorized`, `revoked`, `not_valid`, …; 404 `not_found`), `server_error`
 (502 when the host is unreachable).

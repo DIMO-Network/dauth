@@ -81,7 +81,7 @@ func newEnv(t *testing.T) *env {
 	exchangeKeys, exchangePub := newKeySet(t)
 	signinJWKS, err := signinKeys.JWKS()
 	require.NoError(t, err)
-	identityAuth, err := NewIdentityAuth(signinJWKS, signinIssuer)
+	identity, err := NewIdentityVerifier(signinJWKS, signinIssuer)
 	require.NoError(t, err)
 	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: exchangeIssuer, JWKSURI: exchangeIssuer + "/keys", Keys: exchangeKeys})
 	require.NoError(t, err)
@@ -102,10 +102,11 @@ func newEnv(t *testing.T) *env {
 			tok, _, err := signin.IssueFor(cfg.DauthDID, []string{hostSrv.URL}, 5*time.Minute)
 			return tok, err
 		}},
-		DPoP: dpop.NewVerifier(), ExchangeURL: "https://auth.test/exchange", Log: zerolog.Nop(),
+		Identity: identity,
+		DPoP:     dpop.NewVerifier(), ExchangeURL: "https://auth.test/exchange", Log: zerolog.Nop(),
 		Now: func() time.Time { return now },
 	}
-	surface := NewSurface(h, identityAuth, wk)
+	surface := NewSurface(h, wk)
 	mux := http.NewServeMux()
 	mux.Handle("POST /exchange", surface.Exchange)
 	mux.Handle("/exchange/", http.StripPrefix("/exchange", surface.WellKnown))
@@ -293,6 +294,56 @@ func TestExchangeRefusals(t *testing.T) {
 		defer func() { e.host.status = http.StatusOK }()
 		status, body := e.exchange(t, identity, true, request)
 		assert.Equal(t, http.StatusBadGateway, status, body)
+	})
+}
+
+func TestExchangeClientAssertion(t *testing.T) {
+	e := newEnv(t)
+	e.host.body = map[string]any{"vehicle": vehicleDID, "live": []string{"command:unlock"}, "chain": []string{grantURI}, "at": e.now}
+	identity := e.identity(t, callerDID)
+	const appDID = "did:dimo:fleet-app"
+
+	t.Run("the app's identity token names the client", func(t *testing.T) {
+		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": e.identity(t, appDID)}
+		status, resp := e.exchange(t, identity, true, body)
+		require.Equal(t, http.StatusOK, status, resp)
+		asked := e.host.requests[len(e.host.requests)-1]
+		assert.Equal(t, appDID, asked.ClientID)
+		assert.Equal(t, callerDID, asked.Caller)
+	})
+
+	t.Run("no assertion, no client", func(t *testing.T) {
+		status, resp := e.exchange(t, identity, true, request)
+		require.Equal(t, http.StatusOK, status, resp)
+		assert.Empty(t, e.host.requests[len(e.host.requests)-1].ClientID)
+	})
+
+	t.Run("an assertion from another issuer", func(t *testing.T) {
+		otherKeys, _ := newKeySet(t)
+		other := token.NewIssuer(token.Config{Keys: otherKeys, Issuer: signinIssuer, Audience: []string{"dimo"}, TTL: time.Hour})
+		forged, _, err := other.Issue(appDID, nil)
+		require.NoError(t, err)
+		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": forged}
+		status, resp := e.exchange(t, identity, true, body)
+		assert.Equal(t, http.StatusUnauthorized, status, resp)
+		assert.Equal(t, "invalid_client", resp["error"])
+	})
+
+	t.Run("the caller cannot be its own app", func(t *testing.T) {
+		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": identity}
+		status, resp := e.exchange(t, identity, true, body)
+		assert.Equal(t, http.StatusBadRequest, status, resp)
+		assert.Equal(t, "invalid_client", resp["error"])
+	})
+
+	t.Run("the host refuses a client the allowlist does not name", func(t *testing.T) {
+		e.host.status = http.StatusForbidden
+		e.host.body = map[string]any{"error": "client not allowed", "code": "client_not_allowed"}
+		defer func() { e.host.status = http.StatusOK }()
+		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": e.identity(t, appDID)}
+		status, resp := e.exchange(t, identity, true, body)
+		assert.Equal(t, http.StatusForbidden, status, resp)
+		assert.Equal(t, "client_not_allowed", resp["error"])
 	})
 }
 

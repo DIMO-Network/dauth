@@ -35,6 +35,11 @@ type Request struct {
 	// Audience optionally narrows aud; every value must be in the configured
 	// audience list.
 	Audience []string `json:"audience,omitempty"`
+	// ClientAssertion identifies the app the caller is using: an identity
+	// token for the app's DID, from the app's own sign-in. Its sub is what
+	// the host checks a delegation's clientAllowlist against. Without one no
+	// client is claimed, and a delegation with an allowlist refuses.
+	ClientAssertion string `json:"client_assertion,omitempty"`
 }
 
 // Response is the body of a successful exchange.
@@ -57,6 +62,9 @@ type Handler struct {
 	Keys   *keyset.KeySet
 	// Host answers /authorize.
 	Host Authorizer
+	// Identity verifies the client assertion; the caller's own token was
+	// verified by the middleware.
+	Identity *IdentityVerifier
 	// DPoP verifies proofs; ExchangeURL is the htu a proof must name.
 	DPoP        *dpop.Verifier
 	ExchangeURL string
@@ -113,8 +121,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// An app attests itself the way a caller does: with an identity token
+	// for its own DID. dauth vouches for nothing more than that the app holds
+	// its key; whether the delegation admits that app is the host's call.
+	var clientID string
+	if req.ClientAssertion != "" {
+		did, err := h.Identity.Verify(req.ClientAssertion)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid_client", "client_assertion is not a valid identity token")
+			return
+		}
+		if did == caller {
+			writeError(w, http.StatusBadRequest, "invalid_client", "client_assertion must identify an app, not the caller")
+			return
+		}
+		clientID = did
+	}
+
 	cov, err := h.Host.Authorize(r.Context(), AuthorizeRequest{
-		URI: req.Grant, Caller: caller, Vehicle: req.Vehicle, Abilities: req.Abilities,
+		URI: req.Grant, Caller: caller, ClientID: clientID, Vehicle: req.Vehicle, Abilities: req.Abilities,
 	})
 	if err != nil {
 		var refusal *Refusal
@@ -174,6 +199,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log := h.Log.Info().Str("caller", caller).Str("grant", req.Grant).Str("vehicle", req.Vehicle).
 		Strs("abilities", req.Abilities).Str("jkt", jkt).Time("exp", exp)
+	if clientID != "" {
+		log = log.Str("client", clientID)
+	}
 	if cov.RecoveryUsed {
 		// The one operation that overrides somebody's custody (spec §12.2).
 		log = log.Bool("recoveryUsed", true)

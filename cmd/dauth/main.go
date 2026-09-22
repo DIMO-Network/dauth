@@ -92,11 +92,11 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	identityAuth, err := exchange.NewIdentityAuth(signinJWKS, cfg.Issuer)
+	identity, err := exchange.NewIdentityVerifier(signinJWKS, cfg.Issuer)
 	if err != nil {
 		return err
 	}
-	exchangeSurface, err := buildExchange(cfg, exchangeCfg, issuer, identityAuth, log)
+	exchangeSurface, err := buildExchange(cfg, exchangeCfg, issuer, identity, log)
 	if err != nil {
 		return fmt.Errorf("building exchange surface: %w", err)
 	}
@@ -161,7 +161,7 @@ func buildSignin(ctx context.Context, cfg config.Config, keys *keyset.KeySet, is
 // buildExchange constructs the exchange surface. dauth's own identity for the
 // org host is a sign-in token for DAUTH_DID, minted here and renewed a minute
 // before it expires.
-func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer, identityAuth func(http.Handler) http.Handler, log zerolog.Logger) (exchange.Surface, error) {
+func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer, identity *exchange.IdentityVerifier, log zerolog.Logger) (exchange.Surface, error) {
 	keys, err := keyset.Load(ecfg.SigningKeys)
 	if err != nil {
 		return exchange.Surface{}, fmt.Errorf("failed to load exchange signing keys: %w", err)
@@ -177,20 +177,20 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 	}
 
 	var mu sync.Mutex
-	var self string
+	var selfToken string
 	var selfExp time.Time
-	identity := func(context.Context) (string, error) {
+	self := func(context.Context) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		if self != "" && time.Now().Before(selfExp.Add(-time.Minute)) {
-			return self, nil
+		if selfToken != "" && time.Now().Before(selfExp.Add(-time.Minute)) {
+			return selfToken, nil
 		}
 		tok, exp, err := issuer.IssueFor(ecfg.DauthDID, []string{ecfg.OrgHostURL}, selfTokenTTL)
 		if err != nil {
 			return "", err
 		}
-		self, selfExp = tok, exp
-		return self, nil
+		selfToken, selfExp = tok, exp
+		return selfToken, nil
 	}
 
 	h := &exchange.Handler{
@@ -198,14 +198,15 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 		Keys:   keys,
 		Host: &exchange.OrgHost{
 			BaseURL:  ecfg.OrgHostURL,
-			Identity: identity,
+			Identity: self,
 			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
 		},
+		Identity:    identity,
 		DPoP:        dpop.NewVerifier(),
 		ExchangeURL: cfg.PublicBaseURL + "/exchange",
 		Log:         log,
 	}
-	return exchange.NewSurface(h, identityAuth, wellKnown), nil
+	return exchange.NewSurface(h, wellKnown), nil
 }
 
 func healthCheck(w http.ResponseWriter, _ *http.Request) {
