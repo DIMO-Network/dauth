@@ -1,47 +1,43 @@
-// dauth — DIMO's Web3 auth service. One binary serves two surfaces on one host
-// (e.g. dauth.dimo.zone), routed by path prefix:
+// dauth is DIMO's identity and access token service. One binary serves two
+// surfaces on one host (e.g. dauth.dimo.zone), routed by path prefix:
 //
-//   - /siwe         sign-in: a wallet signs a Sign-In With Ethereum (EIP-4361)
-//     challenge (EOA or deployed EIP-1271 smart account) and gets
-//     a short-lived RS256 token identifying its Ethereum address.
-//   - /exchange     swaps that sign-in token for a permission token scoped
-//     to a DIMO asset, after an on-chain SACD access check.
+//   - /signin    a DID signs a challenge with a key its DID document lists
+//     and gets a short-lived RS256 identity token whose sub is
+//     the DID. The org host accepts these as member identity.
+//   - /exchange  swaps an identity token plus a DPoP proof for an access
+//     token scoped to one vehicle, after the org host has evaluated
+//     the named delegation for that caller.
 //
 // Each surface signs with its own keyset and publishes its own JWKS + OIDC
-// discovery under its prefix (/siwe/keys, /exchange/keys); their iss claims
-// stay distinct. A gRPC TokenExchangeService runs on its own port.
+// discovery under its prefix (/signin/keys, /exchange/keys); their iss claims
+// stay distinct.
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	exchangeapp "github.com/DIMO-Network/dauth/internal/exchange/app"
-	exchangeconfig "github.com/DIMO-Network/dauth/internal/exchange/config"
-	"github.com/DIMO-Network/dauth/internal/exchange/middleware"
+	"github.com/DIMO-Network/dauth/internal/exchange"
 	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/ops"
-	"github.com/DIMO-Network/dauth/internal/siwe/config"
-	_ "github.com/DIMO-Network/dauth/internal/siwe/docs" // registers the sign-in OpenAPI spec (instance "dauth")
-	"github.com/DIMO-Network/dauth/internal/siwe/nonce"
-	"github.com/DIMO-Network/dauth/internal/siwe/server"
-	"github.com/DIMO-Network/dauth/internal/siwe/signer"
-	"github.com/DIMO-Network/dauth/internal/siwe/token"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/DIMO-Network/dauth/internal/signin/config"
+	"github.com/DIMO-Network/dauth/internal/signin/nonce"
+	"github.com/DIMO-Network/dauth/internal/signin/server"
+	"github.com/DIMO-Network/dauth/internal/signin/token"
+	"github.com/DIMO-Network/dauth/pkg/dpop"
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc"
 )
 
 // maxOutstandingChallenges bounds the in-memory nonce store. At ~400 bytes per
@@ -49,20 +45,10 @@ import (
 // under a challenge flood, where rejecting new challenges is the right answer.
 const maxOutstandingChallenges = 100_000
 
-// The two surfaces each have their own OpenAPI spec: the sign-in spec below
-// (instance "dauth", served at /siwe/swagger/) and the exchange spec (instance
-// "swagger", served at /exchange/swagger/) whose annotations live under
-// internal/exchange. Distinct instance names keep them from colliding in
-// this shared module.
-//
-// @title       dauth sign-in API
-// @version     1.0
-// @description DIMO Web3 sign-in. A client signs a Sign-In With Ethereum
-// @description (EIP-4361) challenge and receives a short-lived RS256 JWT carrying
-// @description its Ethereum address, verifiable offline against the published JWKS.
-// @BasePath    /siwe
-//
-//go:generate go tool swag init -g main.go -d ./cmd/dauth,./internal/siwe/server -o ./internal/siwe/docs --instanceName dauth --parseInternal
+// selfTokenTTL is the lifetime of the identity token dauth mints for itself
+// to call the org host with; it is renewed before it runs out.
+const selfTokenTTL = 5 * time.Minute
+
 func main() {
 	log := zerolog.New(os.Stdout).With().Timestamp().Str("app", "dauth").Logger()
 	if err := run(log); err != nil {
@@ -75,7 +61,7 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	exchangeCfg, err := exchangeconfig.Load()
+	exchangeCfg, err := exchange.Load()
 	if err != nil {
 		return fmt.Errorf("loading exchange config: %w", err)
 	}
@@ -87,28 +73,30 @@ func run(log zerolog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// --- Sign-in (/siwe) surface ---------------------------------------------
-	siweKeys, err := keyset.Load(cfg.SigningKeys)
+	// --- Sign-in (/signin) surface -------------------------------------------
+	signinKeys, err := keyset.Load(cfg.SigningKeys)
 	if err != nil {
 		return err
 	}
-	siweHandler, err := buildSIWE(ctx, cfg, siweKeys, log)
+	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL})
+	signinHandler, err := buildSignin(ctx, cfg, signinKeys, issuer, log)
 	if err != nil {
 		return err
 	}
 
 	// --- Exchange (/exchange) surface ----------------------------------------
-	// The exchange validates the inbound sign-in token against the /siwe keyset
-	// in-process — no HTTP fetch of our own not-yet-listening /siwe/keys.
-	siweJWKS, err := siweKeys.JWKS()
+	// The exchange validates the inbound identity token against the /signin
+	// keyset in-process, and calls the org host as its own DID with a token
+	// from the same issuer.
+	signinJWKS, err := signinKeys.JWKS()
 	if err != nil {
 		return err
 	}
-	jwtAuth, err := middleware.NewJWTAuthFromJWKS(siweJWKS)
+	identityAuth, err := exchange.NewIdentityAuth(signinJWKS, cfg.Issuer)
 	if err != nil {
 		return err
 	}
-	exchangeHandler, grpcServer, err := exchangeapp.CreateServers(log, &exchangeCfg, cfg.PublicBaseURL+"/exchange/keys", jwtAuth)
+	exchangeSurface, err := buildExchange(cfg, exchangeCfg, issuer, identityAuth, log)
 	if err != nil {
 		return fmt.Errorf("building exchange surface: %w", err)
 	}
@@ -116,8 +104,9 @@ func run(log zerolog.Logger) error {
 	// --- Compose one public handler ------------------------------------------
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", healthCheck)
-	mux.Handle("/siwe/", http.StripPrefix("/siwe", siweHandler))
-	mux.Handle("/exchange/", http.StripPrefix("/exchange", exchangeHandler))
+	mux.Handle("/signin/", http.StripPrefix("/signin", signinHandler))
+	mux.Handle("POST /exchange", exchangeSurface.Exchange)
+	mux.Handle("/exchange/", http.StripPrefix("/exchange", exchangeSurface.WellKnown))
 	publicHandler := httpmw.Recover(log)(mux)
 
 	publicSrv := &http.Server{
@@ -125,79 +114,98 @@ func run(log zerolog.Logger) error {
 		Handler:           publicHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
 	opsSrv := ops.NewServer(ops.Config{Addr: cfg.OpsAddr, EnablePprof: exchangeCfg.EnablePprof})
 
 	group, gctx := errgroup.WithContext(ctx)
 	group.Go(func() error { return serveHTTP(gctx, publicSrv, log) })
 	group.Go(func() error { return serveHTTP(gctx, opsSrv, log) })
-	group.Go(func() error { return serveGRPC(gctx, grpcServer, fmt.Sprintf(":%d", exchangeCfg.GRPCPort), log) })
 
 	log.Info().
-		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).Int("grpc", exchangeCfg.GRPCPort).
-		Str("public_base_url", cfg.PublicBaseURL).
-		Str("siwe_issuer", cfg.Issuer).Str("siwe_active_kid", siweKeys.ActiveKID()).
-		Str("exchange_issuer", exchangeCfg.Issuer).
+		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).
+		Str("public_base_url", cfg.PublicBaseURL).Str("directory", cfg.DirectoryURL).
+		Str("signin_issuer", cfg.Issuer).Str("signin_active_kid", signinKeys.ActiveKID()).
+		Str("exchange_issuer", exchangeCfg.Issuer).Str("org_host", exchangeCfg.OrgHostURL).Str("dauth_did", exchangeCfg.DauthDID).
 		Msg("dauth started")
 	return group.Wait()
 }
 
-// buildSIWE constructs the sign-in surface handler from an already-loaded
-// keyset.
-func buildSIWE(ctx context.Context, cfg config.Config, keys *keyset.KeySet, log zerolog.Logger) (http.Handler, error) {
-	// EIP-1271 (smart-account) verification needs an RPC backend. Without one
-	// the service still verifies EOA signatures.
-	var backend bind.ContractBackend
-	if cfg.RPCURL != "" {
-		client, err := ethclient.Dial(cfg.RPCURL)
-		if err != nil {
-			return nil, err
-		}
-		// The client lives for the process; release it on shutdown.
-		go func() { <-ctx.Done(); client.Close() }()
-		backend = client
-	} else {
-		log.Warn().Msg("RPC_URL not set; smart-account (EIP-1271) sign-in is disabled")
-	}
-
+// buildSignin constructs the sign-in surface handler from an already-loaded
+// keyset and issuer.
+func buildSignin(ctx context.Context, cfg config.Config, keys *keyset.KeySet, issuer *token.Issuer, log zerolog.Logger) (http.Handler, error) {
 	store, err := newStore(ctx, cfg, log)
 	if err != nil {
 		return nil, err
 	}
 
 	handlers := &server.Handlers{
-		Store:    store,
-		Verifier: signer.New(backend, log),
-		Issuer: token.NewIssuer(token.Config{
-			Keys:     keys,
-			Issuer:   cfg.Issuer,
-			Audience: cfg.Audience,
-			TTL:      cfg.TokenTTL,
-		}),
+		Store:            store,
+		Verifier:         &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(cfg.DirectoryURL)}},
+		Issuer:           issuer,
 		Domain:           cfg.Domain,
-		URI:              cfg.PublicBaseURL,
-		Statement:        cfg.Statement,
-		ChainID:          cfg.ChainID,
 		ChallengeTTL:     cfg.ChallengeTTL,
 		AllowedAudiences: cfg.AllowedAudiences,
 		Log:              log,
 	}
 
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
-		Issuer:          cfg.Issuer,
-		JWKSURI:         cfg.PublicBaseURL + "/siwe/keys",
-		Keys:            keys,
-		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "ethereum_address"},
+		Issuer:  cfg.Issuer,
+		JWKSURI: cfg.PublicBaseURL + "/signin/keys",
+		Keys:    keys,
 	})
 	if err != nil {
 		return nil, err
 	}
+	return server.NewHandler(server.Config{Handlers: handlers, WellKnown: wellKnown}), nil
+}
 
-	handler := server.NewSIWEHandler(server.SIWEConfig{
-		Handlers:  handlers,
-		WellKnown: wellKnown,
+// buildExchange constructs the exchange surface. dauth's own identity for the
+// org host is a sign-in token for DAUTH_DID, minted here and renewed a minute
+// before it expires.
+func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer, identityAuth func(http.Handler) http.Handler, log zerolog.Logger) (exchange.Surface, error) {
+	keys, err := keyset.Load(ecfg.SigningKeys)
+	if err != nil {
+		return exchange.Surface{}, fmt.Errorf("failed to load exchange signing keys: %w", err)
+	}
+	wellKnown, err := oidc.NewWellKnown(oidc.Config{
+		Issuer:          ecfg.Issuer,
+		JWKSURI:         cfg.PublicBaseURL + "/exchange/keys",
+		Keys:            keys,
+		ClaimsSupported: []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "cnf", "grants"},
 	})
-	return handler, nil
+	if err != nil {
+		return exchange.Surface{}, err
+	}
+
+	var mu sync.Mutex
+	var self string
+	var selfExp time.Time
+	identity := func(context.Context) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if self != "" && time.Now().Before(selfExp.Add(-time.Minute)) {
+			return self, nil
+		}
+		tok, exp, err := issuer.IssueFor(ecfg.DauthDID, []string{ecfg.OrgHostURL}, selfTokenTTL)
+		if err != nil {
+			return "", err
+		}
+		self, selfExp = tok, exp
+		return self, nil
+	}
+
+	h := &exchange.Handler{
+		Config: ecfg,
+		Keys:   keys,
+		Host: &exchange.OrgHost{
+			BaseURL:  ecfg.OrgHostURL,
+			Identity: identity,
+			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
+		},
+		DPoP:        dpop.NewVerifier(),
+		ExchangeURL: cfg.PublicBaseURL + "/exchange",
+		Log:         log,
+	}
+	return exchange.NewSurface(h, identityAuth, wellKnown), nil
 }
 
 func healthCheck(w http.ResponseWriter, _ *http.Request) {
@@ -259,29 +267,6 @@ func serveHTTP(ctx context.Context, srv *http.Server, log zerolog.Logger) error 
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Warn().Err(err).Str("addr", srv.Addr).Msg("graceful shutdown failed")
 		}
-		return nil
-	}
-}
-
-// serveGRPC runs the gRPC server until ctx cancels, then stops it gracefully.
-func serveGRPC(ctx context.Context, srv *grpc.Server, addr string, _ zerolog.Logger) error {
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("grpc listen on %s: %w", addr, err)
-	}
-	errCh := make(chan error, 1)
-	go func() {
-		if err := srv.Serve(lis); err != nil {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		srv.GracefulStop()
 		return nil
 	}
 }
