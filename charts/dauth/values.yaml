@@ -27,28 +27,16 @@ env:
   HTTP_ADDRESS: 0.0.0.0:8080
   OPS_ADDRESS: 0.0.0.0:8081
   PUBLIC_BASE_URL: https://dauth.dev.dimo.zone
-  SIWE_ISSUER: https://dauth.dev.dimo.zone/siwe
+  DIRECTORY_URL: http://did-directory-dev:8080
+  SIGNIN_ISSUER: https://dauth.dev.dimo.zone/signin
   JWT_AUDIENCE: dimo
-  SIWE_STATEMENT: Sign in to DIMO.
-  CHAIN_ID: '80002'
   CHALLENGE_TTL: 5m
   TOKEN_TTL: 1h
-  ALLOWABLE_TIME_SKEW: 5m
-  RATE_LIMIT_RPS: '20'
-  RATE_LIMIT_BURST: '40'
   EXCHANGE_ISSUER: https://dauth.dev.dimo.zone/exchange
-  TOKEN_EXPIRATION: 10m
-  GRPC_PORT: '8086'
+  EXCHANGE_AUDIENCE: dq
+  ORG_HOST_URL: http://org-host-dev:8081
+  DAUTH_DID: did:dimo:REPLACE_WITH_DAUTH_DID
   ENABLE_PPROF: 'false'
-  USERS_API_GRPC_ADDRESS: users-api-dev:8086
-  CONTRACT_ADDRESS_SACD: '0x4E5F9320b1c7cB3DE5ebDD760aD67375B66cF8a3'
-  CONTRACT_ADDRESS_TEMPLATE: '0xbfc07085736426295f60baa15dc70743e98fe612'
-  CONTRACT_ADDRESS_MANUFACTURER: '0xA4ad0F9c722588910791A9BAC63ADbB365614Bc7'
-  CONTRACT_ADDRESS_VEHICLE: '0x45fbCD3ef7361d156e8b16F5538AE36DEdf61Da8'
-  IDENTITY_URL: http://identity-api-dev:8080/query
-  IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
-  IPFS_TIMEOUT: 30s
-  DIMO_REGISTRY_CHAIN_ID: '80002'
 postgres:
   enabled: false
 ports:
@@ -57,9 +45,6 @@ ports:
     protocol: TCP
   - name: ops
     containerPort: 8081
-    protocol: TCP
-  - name: grpc
-    containerPort: 8086
     protocol: TCP
 livenessProbe:
   httpGet:
@@ -90,10 +75,6 @@ service:
     ops:
       port: 8081
       targetPort: ops
-      protocol: TCP
-    grpc:
-      port: 8086
-      targetPort: grpc
       protocol: TCP
 ingress:
   enabled: true
