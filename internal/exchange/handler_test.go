@@ -3,14 +3,21 @@ package exchange
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,7 +38,81 @@ const (
 	callerDID      = "did:dimo:renter"
 	vehicleDID     = "did:dimo:car"
 	grantURI       = "at://did:dimo:avis/network.dimo.delegation/booking1:history"
+	exchangeURL    = "https://auth.test/exchange"
 )
+
+// errDirectoryDown stands in for the directory being unreachable.
+var errDirectoryDown = errors.New("directory down")
+
+// didKeys is a KeyVerifier over keys registered in the test, standing in for
+// DID documents in the directory.
+type didKeys struct {
+	mu   sync.Mutex
+	keys map[string]*ecdsa.PublicKey // did#fragment
+	down bool
+}
+
+func (d *didKeys) Verify(_ context.Context, did, fragment string, data []byte, sig string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.down {
+		return errDirectoryDown
+	}
+	pub, ok := d.keys[did+"#"+fragment]
+	if !ok {
+		return errors.New("no such verification method")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil || len(raw) != 64 {
+		return errors.New("bad signature encoding")
+	}
+	sum := sha256.Sum256(data)
+	if !ecdsa.Verify(pub, sum[:], new(big.Int).SetBytes(raw[:32]), new(big.Int).SetBytes(raw[32:])) {
+		return errors.New("invalid signature")
+	}
+	return nil
+}
+
+// app is an app DID with a #signing key the fake directory lists.
+type app struct {
+	did string
+	key *ecdsa.PrivateKey
+}
+
+func (e *env) newApp(t *testing.T, did string) *app {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	e.keys.mu.Lock()
+	e.keys.keys[did+"#signing"] = &key.PublicKey
+	e.keys.mu.Unlock()
+	return &app{did: did, key: key}
+}
+
+// assertion signs a client assertion for the request whose DPoP key is jkt,
+// with any claim in override replacing the default.
+func (a *app) assertion(t *testing.T, jkt string, override map[string]any) string {
+	t.Helper()
+	now := time.Now()
+	claims := map[string]any{
+		"iss": a.did, "sub": a.did, "aud": exchangeURL, "iat": now.Unix(), "exp": now.Add(2 * time.Minute).Unix(),
+		"jti": base64.RawURLEncoding.EncodeToString(big.NewInt(now.UnixNano()).Bytes()), "cnf": map[string]string{"jkt": jkt},
+	}
+	for k, v := range override {
+		claims[k] = v
+	}
+	b64 := base64.RawURLEncoding.EncodeToString
+	h, _ := json.Marshal(map[string]string{"alg": "ES256", "kid": a.did + "#signing"})
+	c, _ := json.Marshal(claims)
+	input := b64(h) + "." + b64(c)
+	sum := sha256.Sum256([]byte(input))
+	r, sv, err := ecdsa.Sign(rand.Reader, a.key, sum[:])
+	require.NoError(t, err)
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	sv.FillBytes(sig[32:])
+	return input + "." + b64(sig)
+}
 
 func newKeySet(t *testing.T) (*keyset.KeySet, *rsa.PublicKey) {
 	t.Helper()
@@ -72,6 +153,7 @@ type env struct {
 	signin      *token.Issuer
 	exchangePub *rsa.PublicKey
 	key         *dpop.Key
+	keys        *didKeys
 	now         time.Time
 }
 
@@ -81,12 +163,13 @@ func newEnv(t *testing.T) *env {
 	exchangeKeys, exchangePub := newKeySet(t)
 	signinJWKS, err := signinKeys.JWKS()
 	require.NoError(t, err)
-	identity, err := NewIdentityVerifier(signinJWKS, signinIssuer)
+	identity, err := NewIdentityVerifier(signinJWKS, signinIssuer, exchangeURL)
 	require.NoError(t, err)
 	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: exchangeIssuer, JWKSURI: exchangeIssuer + "/keys", Keys: exchangeKeys})
 	require.NoError(t, err)
 
 	host := &fakeHost{t: t, status: http.StatusOK}
+	keys := &didKeys{keys: map[string]*ecdsa.PublicKey{}}
 	hostSrv := httptest.NewServer(host)
 	t.Cleanup(hostSrv.Close)
 
@@ -102,11 +185,14 @@ func newEnv(t *testing.T) *env {
 			tok, _, err := signin.IssueFor(cfg.DauthDID, []string{hostSrv.URL}, 5*time.Minute)
 			return tok, err
 		}},
-		Identity: identity,
-		DPoP:     dpop.NewVerifier(), ExchangeURL: "https://auth.test/exchange", Log: zerolog.Nop(),
+		Assertions: &AssertionVerifier{
+			Keys: keys, Audience: exchangeURL,
+			IsUnavailable: func(err error) bool { return errors.Is(err, errDirectoryDown) },
+		},
+		DPoP: dpop.NewVerifier(), ExchangeURL: exchangeURL, Log: zerolog.Nop(),
 		Now: func() time.Time { return now },
 	}
-	surface := NewSurface(h, wk)
+	surface := NewSurface(h, identity, wk)
 	mux := http.NewServeMux()
 	mux.Handle("POST /exchange", surface.Exchange)
 	mux.Handle("/exchange/", http.StripPrefix("/exchange", surface.WellKnown))
@@ -115,12 +201,13 @@ func newEnv(t *testing.T) *env {
 
 	key, err := dpop.GenerateKey()
 	require.NoError(t, err)
-	return &env{ts: ts, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, now: now}
+	return &env{ts: ts, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, keys: keys, now: now}
 }
 
+// identity is did's identity token addressed to the exchange.
 func (e *env) identity(t *testing.T, did string) string {
 	t.Helper()
-	tok, _, err := e.signin.Issue(did, nil)
+	tok, _, err := e.signin.Issue(did, []string{exchangeURL})
 	require.NoError(t, err)
 	return tok
 }
@@ -188,12 +275,14 @@ func TestExchangeMintsGrantsFromCoverage(t *testing.T) {
 	assert.Equal(t, callerDID, claims.Subject)
 	require.NotNil(t, claims.Confirmation)
 	assert.Equal(t, e.key.Thumbprint(), claims.Confirmation.JKT)
-	require.Len(t, claims.Grants, 3)
+	// The host also answered for events:read, which nobody asked for; the
+	// token carries only what was requested.
+	require.Len(t, claims.Grants, 2)
 	assert.Equal(t, []string{"location:precise", "telemetry:read"}, claims.Grants[0].Abilities)
-	assert.Equal(t, []string{"events:read"}, claims.Grants[1].Abilities)
-	assert.Nil(t, claims.Grants[1].Windows[0].End)
-	assert.Equal(t, []string{"command:unlock"}, claims.Grants[2].Abilities)
-	assert.Nil(t, claims.Grants[2].Windows)
+	assert.Equal(t, []string{"command:unlock"}, claims.Grants[1].Abilities)
+	assert.Nil(t, claims.Grants[1].Windows)
+	_, held := claims.Holds(vehicleDID, "events:read")
+	assert.False(t, held)
 	for _, g := range claims.Grants {
 		assert.Equal(t, vehicleDID, g.Subject)
 		assert.Len(t, g.Chain, 2)
@@ -254,6 +343,17 @@ func TestExchangeRefusals(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, status, body)
 	})
 
+	t.Run("identity token for another audience", func(t *testing.T) {
+		tok, _, err := e.signin.Issue(callerDID, []string{"https://orghost.test"})
+		require.NoError(t, err)
+		status, body := e.exchange(t, tok, true, request)
+		assert.Equal(t, http.StatusUnauthorized, status, body)
+		tok, _, err = e.signin.Issue(callerDID, nil)
+		require.NoError(t, err)
+		status, body = e.exchange(t, tok, true, request)
+		assert.Equal(t, http.StatusUnauthorized, status, body, "the default audience is not the exchange")
+	})
+
 	t.Run("no DPoP proof", func(t *testing.T) {
 		status, body := e.exchange(t, identity, false, request)
 		assert.Equal(t, http.StatusBadRequest, status, body)
@@ -288,6 +388,23 @@ func TestExchangeRefusals(t *testing.T) {
 		assert.Equal(t, "not_found", body["error"])
 	})
 
+	t.Run("host cannot read the request", func(t *testing.T) {
+		e.host.status = http.StatusBadRequest
+		e.host.body = map[string]any{"error": "uri: not a record URI"}
+		defer func() { e.host.status = http.StatusOK }()
+		status, body := e.exchange(t, identity, true, request)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "invalid_request", body["error"])
+	})
+
+	t.Run("host answers for another vehicle", func(t *testing.T) {
+		saved := e.host.body
+		e.host.body = map[string]any{"vehicle": "did:dimo:other", "live": []string{"command:unlock"}, "chain": []string{grantURI}, "at": e.now}
+		defer func() { e.host.body = saved }()
+		status, body := e.exchange(t, identity, true, request)
+		assert.Equal(t, http.StatusBadGateway, status, body)
+	})
+
 	t.Run("host down", func(t *testing.T) {
 		e.host.status = http.StatusInternalServerError
 		e.host.body = map[string]any{"error": "internal error"}
@@ -301,14 +418,23 @@ func TestExchangeClientAssertion(t *testing.T) {
 	e := newEnv(t)
 	e.host.body = map[string]any{"vehicle": vehicleDID, "live": []string{"command:unlock"}, "chain": []string{grantURI}, "at": e.now}
 	identity := e.identity(t, callerDID)
-	const appDID = "did:dimo:fleet-app"
+	fleetApp := e.newApp(t, "did:dimo:fleet-app")
+	jkt := e.key.Thumbprint()
+	with := func(assertion string) map[string]any {
+		return map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": assertion}
+	}
+	refused := func(t *testing.T, assertion string, status int) {
+		t.Helper()
+		got, resp := e.exchange(t, identity, true, with(assertion))
+		assert.Equal(t, status, got, resp)
+		assert.Equal(t, "invalid_client", resp["error"])
+	}
 
-	t.Run("the app's identity token names the client", func(t *testing.T) {
-		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": e.identity(t, appDID)}
-		status, resp := e.exchange(t, identity, true, body)
+	t.Run("the app's assertion names the client", func(t *testing.T) {
+		status, resp := e.exchange(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
 		require.Equal(t, http.StatusOK, status, resp)
 		asked := e.host.requests[len(e.host.requests)-1]
-		assert.Equal(t, appDID, asked.ClientID)
+		assert.Equal(t, fleetApp.did, asked.ClientID)
 		assert.Equal(t, callerDID, asked.Caller)
 	})
 
@@ -318,30 +444,65 @@ func TestExchangeClientAssertion(t *testing.T) {
 		assert.Empty(t, e.host.requests[len(e.host.requests)-1].ClientID)
 	})
 
-	t.Run("an assertion from another issuer", func(t *testing.T) {
-		otherKeys, _ := newKeySet(t)
-		other := token.NewIssuer(token.Config{Keys: otherKeys, Issuer: signinIssuer, Audience: []string{"dimo"}, TTL: time.Hour})
-		forged, _, err := other.Issue(appDID, nil)
+	t.Run("an assertion is used once", func(t *testing.T) {
+		a := fleetApp.assertion(t, jkt, nil)
+		status, resp := e.exchange(t, identity, true, with(a))
+		require.Equal(t, http.StatusOK, status, resp)
+		refused(t, a, http.StatusUnauthorized)
+	})
+
+	t.Run("an assertion made for another caller's key", func(t *testing.T) {
+		other, err := dpop.GenerateKey()
 		require.NoError(t, err)
-		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": forged}
-		status, resp := e.exchange(t, identity, true, body)
-		assert.Equal(t, http.StatusUnauthorized, status, resp)
-		assert.Equal(t, "invalid_client", resp["error"])
+		refused(t, fleetApp.assertion(t, other.Thumbprint(), nil), http.StatusUnauthorized)
+		refused(t, fleetApp.assertion(t, jkt, map[string]any{"cnf": nil}), http.StatusUnauthorized)
+	})
+
+	t.Run("an assertion for somewhere else", func(t *testing.T) {
+		refused(t, fleetApp.assertion(t, jkt, map[string]any{"aud": "https://orghost.test"}), http.StatusUnauthorized)
+	})
+
+	t.Run("an identity token is not an assertion", func(t *testing.T) {
+		tok, _, err := e.signin.Issue(fleetApp.did, []string{exchangeURL})
+		require.NoError(t, err)
+		refused(t, tok, http.StatusUnauthorized)
+	})
+
+	t.Run("lifetimes", func(t *testing.T) {
+		now := time.Now()
+		refused(t, fleetApp.assertion(t, jkt, map[string]any{"exp": now.Add(time.Hour).Unix()}), http.StatusUnauthorized)
+		refused(t, fleetApp.assertion(t, jkt, map[string]any{"iat": now.Add(-10 * time.Minute).Unix(), "exp": now.Add(-6 * time.Minute).Unix()}), http.StatusUnauthorized)
+		refused(t, fleetApp.assertion(t, jkt, map[string]any{"jti": ""}), http.StatusUnauthorized)
+	})
+
+	t.Run("signed by a key the app's document does not list", func(t *testing.T) {
+		impostor := &app{did: fleetApp.did}
+		var err error
+		impostor.key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		refused(t, impostor.assertion(t, jkt, nil), http.StatusUnauthorized)
+		refused(t, fleetApp.assertion(t, jkt, map[string]any{"iss": "did:dimo:other-app", "sub": "did:dimo:other-app"}), http.StatusUnauthorized)
 	})
 
 	t.Run("the caller cannot be its own app", func(t *testing.T) {
-		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": identity}
-		status, resp := e.exchange(t, identity, true, body)
-		assert.Equal(t, http.StatusBadRequest, status, resp)
-		assert.Equal(t, "invalid_client", resp["error"])
+		caller := e.newApp(t, callerDID)
+		refused(t, caller.assertion(t, jkt, nil), http.StatusBadRequest)
+	})
+
+	t.Run("the directory is down", func(t *testing.T) {
+		e.keys.mu.Lock()
+		e.keys.down = true
+		e.keys.mu.Unlock()
+		defer func() { e.keys.mu.Lock(); e.keys.down = false; e.keys.mu.Unlock() }()
+		status, resp := e.exchange(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
+		assert.Equal(t, http.StatusServiceUnavailable, status, resp)
 	})
 
 	t.Run("the host refuses a client the allowlist does not name", func(t *testing.T) {
 		e.host.status = http.StatusForbidden
 		e.host.body = map[string]any{"error": "client not allowed", "code": "client_not_allowed"}
 		defer func() { e.host.status = http.StatusOK }()
-		body := map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"command:unlock"}, "client_assertion": e.identity(t, appDID)}
-		status, resp := e.exchange(t, identity, true, body)
+		status, resp := e.exchange(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
 		assert.Equal(t, http.StatusForbidden, status, resp)
 		assert.Equal(t, "client_not_allowed", resp["error"])
 	})

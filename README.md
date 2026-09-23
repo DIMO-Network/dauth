@@ -67,11 +67,15 @@ repository commit key, is never accepted as a login key.
 ### `POST /signin/challenge`
 
 ```json
-{ "did": "did:dimo:…", "audience": ["org-host"] }
+{ "did": "did:dimo:…", "audience": ["https://orghost.dimo.zone"] }
 ```
 
-`audience` is optional and must be on `SIGNIN_ALLOWED_AUDIENCES`; omitted, the
-token carries `JWT_AUDIENCE`. Returns `{ challenge, nonce, expires_at }`.
+`audience` names the service the token is for, and every service that takes
+these tokens checks it: the exchange accepts only `<PUBLIC_BASE_URL>/exchange`,
+the org host only its own URL. Those two may always be requested; anything
+else must be on `SIGNIN_ALLOWED_AUDIENCES`. Omitted, the token carries
+`JWT_AUDIENCE`, which neither the exchange nor the org host accepts. Returns
+`{ challenge, nonce, expires_at }`.
 
 ### `POST /signin/token`
 
@@ -107,7 +111,8 @@ client                                dauth                               org ho
   │  Authorization: Bearer <identity>   │                                      │
   │  DPoP: <proof for POST /exchange>   │                                      │
   │  {grant, vehicle, abilities}        │                                      │
-  │ ───────────────────────────────────▶  verify identity token (sub = caller) │
+  │ ───────────────────────────────────▶  verify identity token (sub = caller, │
+  │                                     │    aud = <PUBLIC_BASE_URL>/exchange) │
   │                                     │  verify DPoP proof → jkt             │
   │                                     │  POST /authorize as DAUTH_DID ───────▶
   │                                     │  {uri, caller, vehicle, abilities}   │
@@ -124,7 +129,8 @@ reads dauth's keys from `…/signin/keys`.
 
 ### `POST /exchange`
 
-Headers: `Authorization: Bearer <identity token>` and `DPoP: <proof>`. The
+Headers: `Authorization: Bearer <identity token>`, addressed to
+`<PUBLIC_BASE_URL>/exchange`, and `DPoP: <proof>`. The
 proof is an RFC 9449 proof JWT (ES256 or RS256, `typ: dpop+jwt`, public key in
 `jwk`, claims `jti`, `htm: POST`, `htu: <PUBLIC_BASE_URL>/exchange`, `iat`
 within five minutes). `pkg/dpop.Key.Proof` makes one.
@@ -135,22 +141,37 @@ within five minutes). `pkg/dpop.Key.Proof` makes one.
   "vehicle": "did:dimo:veh…",
   "abilities": ["telemetry:read", "location:precise"],
   "audience": ["dq"],
-  "client_assertion": "<identity token for the app's DID>"
+  "client_assertion": "<JWT signed by the app's DID key>"
 }
 ```
 
-`client_assertion` is optional and names the app the caller is using: an
-identity token from the app's own sign-in, whose `sub` is the app's DID.
-dauth verifies it like the caller's token and passes the DID to the host as
-`clientId`, which is what a delegation's `clientAllowlist` is checked against.
-Without one no client is claimed, and a delegation with an allowlist refuses.
+`client_assertion` is optional and names the app the caller is using. It is
+an RFC 7523-style assertion the app signs with a key its DID document lists:
+
+```
+header  {"alg": "ES256", "kid": "<app DID>#signing"}
+claims  {"iss": <app DID>, "sub": <app DID>, "aud": "<PUBLIC_BASE_URL>/exchange",
+         "iat", "exp" (at most 5 minutes after iat), "jti",
+         "cnf": {"jkt": <thumbprint of the caller's DPoP key>}}
+```
+
+dauth checks the signature against the app's DID document, refuses a `jti` it
+has seen, and requires `cnf.jkt` to be the key of this request's DPoP proof,
+so an assertion the app made for one caller cannot be used by another. It
+passes the app's DID to the host as `clientId`, which is what a delegation's
+`clientAllowlist` is checked against. Without one no client is claimed, and a
+delegation with an allowlist refuses. An identity token is not an assertion:
+it would let whoever held it sign in as the app.
+
+The token carries only the abilities asked for, of those the host covers.
 
 Returns `{ token, token_type: "DPoP", expires_in, expires_at }`. Refusals:
-`invalid_token` (401), `invalid_client` (401 for a bad assertion, 400 when it
-names the caller), `invalid_dpop_proof` (400), `invalid_request` (400),
+`invalid_token` (401, including a token addressed elsewhere), `invalid_client`
+(401 for a bad assertion, 400 when it names the caller), `invalid_dpop_proof`
+(400), `invalid_request` (400, also when the host cannot read the request),
 the host's own code (403: `not_covered`, `exclusive_hold` with `suspended`,
 `unauthorized`, `revoked`, `not_valid`, …; 404 `not_found`), `server_error`
-(502 when the host is unreachable).
+(502 when the host is unreachable, 503 when the app's DID cannot be resolved).
 
 ### Validation surface
 
@@ -238,7 +259,9 @@ make test
 
 `make run` expects a DID directory on `DIRECTORY_URL` (default
 `http://localhost:8082`) and an org host on `ORG_HOST_URL` (default
-`http://localhost:8081`) configured with `ISSUER_DIDS=did:dimo:dauth` and
-`IDENTITY_JWKS_URL=http://localhost:8080/signin/keys`. Then, from the
-did-directory repo, `dimocli signin --did <did> --dauth http://localhost:8080`
-prints an identity token.
+`http://localhost:8081`) configured with `ISSUER_DIDS=did:dimo:dauth`,
+`IDENTITY_JWKS_URL=http://localhost:8080/signin/keys`,
+`IDENTITY_ISSUER=http://localhost:8080/signin` and
+`IDENTITY_AUDIENCE=http://localhost:8081`. Then, from the did-directory repo,
+`dimocli signin --did <did> --dauth http://localhost:8080 --audience
+http://localhost:8081` prints an identity token the host accepts.

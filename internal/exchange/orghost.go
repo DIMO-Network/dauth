@@ -36,7 +36,8 @@ type Coverage struct {
 }
 
 // Refusal is the host declining to authorize: a 403 with a code naming the
-// evaluator's error, or a 404 for a delegation the host does not hold.
+// evaluator's error, a 404 for a delegation the host does not hold, or a 400
+// for a request the host could not read, such as a grant URI it cannot parse.
 type Refusal struct {
 	Status    int
 	Code      string
@@ -115,6 +116,17 @@ func (h *OrgHost) Authorize(ctx context.Context, req AuthorizeRequest) (*Coverag
 			return nil, fmt.Errorf("%w: %s: %s", ErrOrgHost, resp.Status, string(data))
 		}
 		return nil, &Refusal{Status: resp.StatusCode, Code: body.Code, Message: body.Error, Suspended: body.Suspended}
+	case resp.StatusCode == http.StatusBadRequest:
+		// The caller's request, relayed, did not parse on the host: the caller's
+		// error, not an outage.
+		var body struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(data, &body)
+		if body.Error == "" {
+			body.Error = string(data)
+		}
+		return nil, &Refusal{Status: resp.StatusCode, Code: "invalid_request", Message: body.Error}
 	default:
 		return nil, fmt.Errorf("%w: %s: %s", ErrOrgHost, resp.Status, string(data))
 	}

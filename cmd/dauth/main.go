@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -79,7 +80,7 @@ func run(log zerolog.Logger) error {
 		return err
 	}
 	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL})
-	signinHandler, err := buildSignin(ctx, cfg, signinKeys, issuer, log)
+	signinHandler, err := buildSignin(ctx, cfg, relyingParties(cfg, exchangeCfg), signinKeys, issuer, log)
 	if err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	identity, err := exchange.NewIdentityVerifier(signinJWKS, cfg.Issuer)
+	identity, err := exchange.NewIdentityVerifier(signinJWKS, cfg.Issuer, cfg.PublicBaseURL+"/exchange")
 	if err != nil {
 		return err
 	}
@@ -131,7 +132,7 @@ func run(log zerolog.Logger) error {
 
 // buildSignin constructs the sign-in surface handler from an already-loaded
 // keyset and issuer.
-func buildSignin(ctx context.Context, cfg config.Config, keys *keyset.KeySet, issuer *token.Issuer, log zerolog.Logger) (http.Handler, error) {
+func buildSignin(ctx context.Context, cfg config.Config, audiences []string, keys *keyset.KeySet, issuer *token.Issuer, log zerolog.Logger) (http.Handler, error) {
 	store, err := newStore(ctx, cfg, log)
 	if err != nil {
 		return nil, err
@@ -143,7 +144,7 @@ func buildSignin(ctx context.Context, cfg config.Config, keys *keyset.KeySet, is
 		Issuer:           issuer,
 		Domain:           cfg.Domain,
 		ChallengeTTL:     cfg.ChallengeTTL,
-		AllowedAudiences: cfg.AllowedAudiences,
+		AllowedAudiences: audiences,
 		Log:              log,
 	}
 
@@ -193,6 +194,7 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 		return selfToken, nil
 	}
 
+	exchangeURL := cfg.PublicBaseURL + "/exchange"
 	h := &exchange.Handler{
 		Config: ecfg,
 		Keys:   keys,
@@ -201,12 +203,24 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 			Identity: self,
 			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
 		},
-		Identity:    identity,
+		Assertions: &exchange.AssertionVerifier{
+			Keys:          &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(cfg.DirectoryURL)}},
+			Audience:      exchangeURL,
+			IsUnavailable: func(err error) bool { return errors.Is(err, server.ErrDirectory) },
+		},
 		DPoP:        dpop.NewVerifier(),
-		ExchangeURL: cfg.PublicBaseURL + "/exchange",
+		ExchangeURL: exchangeURL,
 		Log:         log,
 	}
-	return exchange.NewSurface(h, wellKnown), nil
+	return exchange.NewSurface(h, identity, wellKnown), nil
+}
+
+// relyingParties is the audiences a sign-in may ask for: those configured,
+// plus the two dauth itself knows need identity tokens of their own, the
+// exchange and the org host. Each checks aud, so a token is only ever good
+// where its holder asked for it to be.
+func relyingParties(cfg config.Config, ecfg exchange.Config) []string {
+	return append(slices.Clone(cfg.AllowedAudiences), cfg.PublicBaseURL+"/exchange", ecfg.OrgHostURL)
 }
 
 func healthCheck(w http.ResponseWriter, _ *http.Request) {

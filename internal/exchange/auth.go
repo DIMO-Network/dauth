@@ -16,10 +16,11 @@ type ctxKey string
 
 const callerKey ctxKey = "caller"
 
-// IdentityVerifier checks identity tokens from the sign-in surface: the
-// caller's, presented as the Bearer token, and an app's, presented as the
-// client assertion. Both are the same kind of token; what differs is whose
-// DID is in sub.
+// IdentityVerifier checks the caller's identity token from the sign-in
+// surface, presented as the Bearer token. The token must be addressed to the
+// exchange: dauth issues one kind of identity token to every relying party,
+// and aud is what keeps a token a user signed in with for somewhere else from
+// minting access tokens as them.
 type IdentityVerifier struct {
 	jwks   keyfunc.Keyfunc
 	parser *jwt.Parser
@@ -27,15 +28,19 @@ type IdentityVerifier struct {
 
 // NewIdentityVerifier builds a verifier over the sign-in surface's JWKS
 // (supplied in memory: the binary holds both keysets, so there is no
-// self-referential fetch of its own /signin/keys at startup) and issuer.
-func NewIdentityVerifier(jwksJSON []byte, issuer string) (*IdentityVerifier, error) {
+// self-referential fetch of its own /signin/keys at startup), its issuer, and
+// the audience a token must name.
+func NewIdentityVerifier(jwksJSON []byte, issuer, audience string) (*IdentityVerifier, error) {
+	if audience == "" {
+		return nil, errors.New("an identity token audience is required")
+	}
 	jwks, err := keyfunc.NewJWKSetJSON(json.RawMessage(jwksJSON))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build keyfunc from in-memory JWKS: %w", err)
 	}
 	return &IdentityVerifier{
 		jwks:   jwks,
-		parser: jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(issuer), jwt.WithExpirationRequired()),
+		parser: jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(issuer), jwt.WithAudience(audience), jwt.WithExpirationRequired()),
 	}, nil
 }
 

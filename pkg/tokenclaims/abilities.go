@@ -26,3 +26,14 @@ const (
 	AbilityCommandUnlock = "command:unlock"
 	AbilityCommandCharge = "command:charge"
 )
+
+// historical is the historical vocabulary: abilities read against data
+// timestamps, which a grant must bound with windows.
+var historical = map[string]bool{
+	AbilityTelemetryRead: true, AbilityHealthRead: true, AbilityLocationPrecise: true,
+	AbilityLocationApproximate: true, AbilityEventsRead: true, AbilityDocumentsRead: true,
+	AbilityRawRead: true,
+}
+
+// IsHistorical reports whether ability is checked against data timestamps.
+func IsHistorical(ability string) bool { return historical[ability] }

@@ -35,10 +35,11 @@ type Request struct {
 	// Audience optionally narrows aud; every value must be in the configured
 	// audience list.
 	Audience []string `json:"audience,omitempty"`
-	// ClientAssertion identifies the app the caller is using: an identity
-	// token for the app's DID, from the app's own sign-in. Its sub is what
-	// the host checks a delegation's clientAllowlist against. Without one no
-	// client is claimed, and a delegation with an allowlist refuses.
+	// ClientAssertion identifies the app the caller is using: a short JWT the
+	// app signs with its own DID's key, addressed to this exchange and bound to
+	// the caller's DPoP key (see AssertionVerifier). Its iss is what the host
+	// checks a delegation's clientAllowlist against. Without one no client is
+	// claimed, and a delegation with an allowlist refuses.
 	ClientAssertion string `json:"client_assertion,omitempty"`
 }
 
@@ -62,9 +63,9 @@ type Handler struct {
 	Keys   *keyset.KeySet
 	// Host answers /authorize.
 	Host Authorizer
-	// Identity verifies the client assertion; the caller's own token was
-	// verified by the middleware.
-	Identity *IdentityVerifier
+	// Assertions verifies client assertions; the caller's own identity token
+	// was verified by the middleware.
+	Assertions *AssertionVerifier
 	// DPoP verifies proofs; ExchangeURL is the htu a proof must name.
 	DPoP        *dpop.Verifier
 	ExchangeURL string
@@ -121,14 +122,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// An app attests itself the way a caller does: with an identity token
-	// for its own DID. dauth vouches for nothing more than that the app holds
-	// its key; whether the delegation admits that app is the host's call.
+	// dauth vouches for nothing more than that the app holds its key and
+	// signed for this request; whether the delegation admits that app is the
+	// host's call.
 	var clientID string
 	if req.ClientAssertion != "" {
-		did, err := h.Identity.Verify(req.ClientAssertion)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid_client", "client_assertion is not a valid identity token")
+		did, err := h.Assertions.Verify(r.Context(), req.ClientAssertion, jkt)
+		switch {
+		case errors.Is(err, ErrAssertionKeys):
+			h.Log.Warn().Err(err).Msg("resolving the app's keys")
+			writeError(w, http.StatusServiceUnavailable, "server_error", "could not resolve the app's DID, retry shortly")
+			return
+		case err != nil:
+			writeError(w, http.StatusUnauthorized, "invalid_client", err.Error())
 			return
 		}
 		if did == caller {
@@ -147,8 +153,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case errors.As(err, &refusal):
 			h.Log.Info().Str("caller", caller).Str("grant", req.Grant).Str("vehicle", req.Vehicle).Str("code", refusal.Code).Msg("exchange refused")
 			status := http.StatusForbidden
-			if refusal.Status == http.StatusNotFound {
-				status = http.StatusNotFound
+			if refusal.Status == http.StatusNotFound || refusal.Status == http.StatusBadRequest {
+				status = refusal.Status
 			}
 			writeJSON(w, status, errorResponse{Error: refusal.Code, ErrorDescription: refusal.Message, Suspended: refusal.Suspended})
 		case errors.Is(err, ErrOrgHost):
@@ -161,6 +167,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The token carries what was asked for, of what the host covers, and never
+	// more: a host answering for another vehicle or with abilities nobody
+	// requested is not believed.
+	if cov.Vehicle != req.Vehicle {
+		h.Log.Error().Str("grant", req.Grant).Str("asked", req.Vehicle).Str("answered", cov.Vehicle).Msg("org host answered for another vehicle")
+		writeError(w, http.StatusBadGateway, "server_error", "the org host answered for another vehicle")
+		return
+	}
+	cov = cov.restrictTo(req.Abilities)
 	grants := grantsFor(cov)
 	if len(grants) == 0 {
 		// The host answers 403 for empty coverage; this is belt and braces.
@@ -224,6 +239,24 @@ func (r *Request) validate() error {
 		return errors.New("abilities must not contain an empty string")
 	}
 	return nil
+}
+
+// restrictTo returns the coverage narrowed to the requested abilities.
+func (c *Coverage) restrictTo(abilities []string) *Coverage {
+	out := *c
+	out.Historical = map[string]tokenclaims.Windows{}
+	for a, ws := range c.Historical {
+		if slices.Contains(abilities, a) {
+			out.Historical[a] = ws
+		}
+	}
+	out.Live = nil
+	for _, a := range c.Live {
+		if slices.Contains(abilities, a) {
+			out.Live = append(out.Live, a)
+		}
+	}
+	return &out
 }
 
 // grantsFor turns coverage into token grants: one for the live abilities,

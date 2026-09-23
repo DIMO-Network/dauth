@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,11 +86,31 @@ func TestHolds(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	good := Token{Grants: []Grant{{Subject: "did:dimo:car", Abilities: []string{"telemetry:read"}}}}
+	good := Token{
+		Grants:       []Grant{{Subject: "did:dimo:car", Abilities: []string{"telemetry:read"}, Windows: Windows{{}}}},
+		Confirmation: &Confirmation{JKT: "thumbprint"},
+	}
 	good.Subject = "did:dimo:me"
+	good.ExpiresAt = jwt.NewNumericDate(time.Now().Add(time.Hour))
 	assert.NoError(t, good.Validate())
 
 	bad := good
+	bad.ExpiresAt = nil
+	assert.Error(t, bad.Validate(), "a token without exp never expires")
+
+	bad = good
+	bad.Confirmation = nil
+	assert.Error(t, bad.Validate(), "a token without cnf is a bearer token")
+
+	bad = good
+	bad.Grants = []Grant{{Subject: "did:dimo:car", Abilities: []string{"telemetry:read"}}}
+	assert.Error(t, bad.Validate(), "a historical ability without windows would read everything")
+
+	live := good
+	live.Grants = []Grant{{Subject: "did:dimo:car", Abilities: []string{"command:unlock"}}}
+	assert.NoError(t, live.Validate())
+
+	bad = good
 	bad.Subject = ""
 	assert.Error(t, bad.Validate())
 
@@ -98,7 +119,7 @@ func TestValidate(t *testing.T) {
 	assert.Error(t, bad.Validate())
 
 	bad = good
-	bad.Grants = []Grant{{Subject: "car", Abilities: []string{"telemetry:read"}}}
+	bad.Grants = []Grant{{Subject: "car", Abilities: []string{"telemetry:read"}, Windows: Windows{{}}}}
 	assert.Error(t, bad.Validate())
 
 	bad = good

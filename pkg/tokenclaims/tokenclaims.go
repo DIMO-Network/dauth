@@ -49,11 +49,20 @@ type Grant struct {
 }
 
 // Validate implements the structural checks a validator applies before
-// trusting the grants: a subject, at least one grant, and every grant with a
-// DID subject, at least one ability and well-formed windows.
+// trusting the grants: a subject, an expiry, a DPoP binding (spec §11.1:
+// tokens are always DPoP-bound), at least one grant, and every grant with a
+// DID subject, at least one ability and well-formed windows, which a grant of
+// historical abilities must carry: a missing window would read as no
+// restriction at all.
 func (t *Token) Validate() error {
 	if t.Subject == "" {
 		return errors.New("sub is required")
+	}
+	if t.ExpiresAt == nil {
+		return errors.New("exp is required")
+	}
+	if t.Confirmation == nil || t.Confirmation.JKT == "" {
+		return errors.New("cnf.jkt is required: every token is bound to a DPoP key")
 	}
 	if len(t.Grants) == 0 {
 		return errors.New("grants must not be empty")
@@ -70,6 +79,9 @@ func (t *Token) Validate() error {
 		}
 		if err := g.Windows.Validate(); err != nil {
 			return fmt.Errorf("grants[%d]: windows: %w", i, err)
+		}
+		if g.Windows == nil && slices.ContainsFunc(g.Abilities, IsHistorical) {
+			return fmt.Errorf("grants[%d]: historical abilities need windows", i)
 		}
 	}
 	return nil
