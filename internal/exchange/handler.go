@@ -25,8 +25,11 @@ import (
 
 // Request is the body of POST /exchange.
 type Request struct {
-	// Grant is the at:// URI of the delegation the caller is exercising.
-	Grant string `json:"grant"`
+	// Grant is the at:// URI of the delegation the caller is exercising. Empty
+	// asks for the vehicle as its controller, or as a member of an org that
+	// controls it: a controller's root is implicit (spec §7), so there is no
+	// record to name.
+	Grant string `json:"grant,omitempty"`
 	// Vehicle is the vehicle DID the token is for.
 	Vehicle string `json:"vehicle"`
 	// Abilities are the abilities asked for; the token carries the subset the
@@ -226,7 +229,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (r *Request) validate() error {
-	if !strings.HasPrefix(r.Grant, "at://") {
+	if r.Grant != "" && !strings.HasPrefix(r.Grant, "at://") {
 		return errors.New("grant must be an at:// record URI")
 	}
 	if !isDID(r.Vehicle) {

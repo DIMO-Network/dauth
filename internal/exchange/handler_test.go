@@ -252,6 +252,27 @@ func (e *env) parse(t *testing.T, signed string) *tokenclaims.Token {
 
 var request = map[string]any{"grant": grantURI, "vehicle": vehicleDID, "abilities": []string{"telemetry:read", "location:precise", "command:unlock"}}
 
+// With no grant the caller asks as the vehicle's controller: the host is
+// asked with no uri, and the token's chain starts at the opening.
+func TestExchangeAsController(t *testing.T) {
+	e := newEnv(t)
+	opening := "at://" + callerDID + "/network.dimo.org.vehicleControl/" + vehicleDID
+	e.host.body = map[string]any{
+		"vehicle":    vehicleDID,
+		"historical": map[string]any{"telemetry:read": [][]any{{"2026-09-01T00:00:00Z", nil}}},
+		"chain":      []string{opening},
+		"at":         e.now,
+	}
+	status, body := e.exchange(t, e.identity(t, callerDID), true, map[string]any{"vehicle": vehicleDID, "abilities": []string{"telemetry:read"}})
+	require.Equal(t, http.StatusOK, status, body)
+	claims := e.parse(t, body["token"].(string))
+	require.Len(t, claims.Grants, 1)
+	assert.Equal(t, []string{opening}, claims.Grants[0].Chain)
+	require.Len(t, e.host.requests, 1)
+	assert.Empty(t, e.host.requests[0].URI)
+	assert.Equal(t, callerDID, e.host.requests[0].Caller)
+}
+
 func TestExchangeMintsGrantsFromCoverage(t *testing.T) {
 	e := newEnv(t)
 	e.host.body = map[string]any{
