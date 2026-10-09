@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 )
 
 // AuthorizeRequest is the body of the org host's POST /authorize (plan §3.3).
@@ -65,6 +66,9 @@ type OrgHost struct {
 	// Identity supplies dauth's own identity token for the call; the host
 	// admits it because its sub is in the host's ISSUER_DIDS.
 	Identity func(ctx context.Context) (string, error)
+	// Key is the DPoP key that token is bound to; it signs a proof for every
+	// call.
+	Key *dpop.Key
 	// HTTP is the client to send with; nil means http.DefaultClient.
 	HTTP *http.Client
 }
@@ -84,7 +88,12 @@ func (h *OrgHost) Authorize(ctx context.Context, req AuthorizeRequest) (*Coverag
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	proof, err := h.Key.Proof(http.MethodPost, httpReq.URL.String(), token, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("%w: DPoP proof: %v", ErrOrgHost, err)
+	}
+	httpReq.Header.Set("Authorization", dpop.TokenType+" "+token)
+	httpReq.Header.Set(dpop.HeaderName, proof)
 	client := h.HTTP
 	if client == nil {
 		client = http.DefaultClient

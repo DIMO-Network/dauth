@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/keyset"
-	"github.com/DIMO-Network/dauth/pkg/dpop"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -87,7 +87,7 @@ func (h *Handler) now() time.Time {
 // ServeHTTP handles POST /exchange. The identity middleware has already put
 // the caller's DID in the context.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	caller, ok := CallerFromContext(r.Context())
+	who, ok := CallerFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid_token", "no authenticated caller")
 		return
@@ -101,11 +101,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "a DPoP proof header is required")
 		return
 	}
-	jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.ExchangeURL, "")
+	jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.ExchangeURL, who.Token)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
 		return
 	}
+	// One key from sign-in to data: the proof must come from the key the
+	// identity token is bound to, so the access token is bound to it too and
+	// a copied identity token mints nothing.
+	if jkt != who.JKT {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "the DPoP proof is not from the key the identity token is bound to")
+		return
+	}
+	caller := who.DID
 
 	var req Request
 	dec := json.NewDecoder(r.Body)

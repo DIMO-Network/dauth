@@ -27,6 +27,11 @@ type Challenge struct {
 	// challenge time so it cannot be swapped at /token time. Empty means the
 	// issuer's configured default audience.
 	Audience []string
+	// Scopes and JKT are the token's scopes and the thumbprint of the DPoP
+	// key it will be bound to, fixed at challenge time like Audience; the
+	// challenge text names both, so the DID's signature covers them.
+	Scopes []string
+	JKT    string
 }
 
 // Store records and atomically consumes challenges, keyed by nonce. The two

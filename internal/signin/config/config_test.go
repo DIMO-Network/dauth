@@ -29,7 +29,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, []string{"dimo"}, s.Audience)
 	assert.Equal(t, "https://did.dimo.zone", s.DirectoryURL)
 	assert.Equal(t, 5*time.Minute, s.ChallengeTTL)
-	assert.Equal(t, time.Hour, s.TokenTTL)
+	assert.Equal(t, 15*time.Minute, s.TokenTTL)
+	assert.Equal(t, 5*time.Minute, s.ApproveTTL)
 	assert.Len(t, s.SigningKeys, 1)
 }
 
