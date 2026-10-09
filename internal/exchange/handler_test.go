@@ -24,8 +24,8 @@ import (
 	"github.com/DIMO-Network/dauth/internal/keyset"
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/signin/token"
-	"github.com/DIMO-Network/dauth/pkg/dpop"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -174,6 +174,8 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(hostSrv.Close)
 
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	selfKey, err := dpop.GenerateKey()
+	require.NoError(t, err)
 	signin := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: signinIssuer, Audience: []string{"dimo"}, TTL: time.Hour})
 	cfg := Config{
 		Issuer: exchangeIssuer, Audience: []string{"dq", "din"}, DauthDID: "did:dimo:dauth",
@@ -181,8 +183,8 @@ func newEnv(t *testing.T) *env {
 	}
 	h := &Handler{
 		Config: cfg, Keys: exchangeKeys,
-		Host: &OrgHost{BaseURL: hostSrv.URL, Identity: func(ctx context.Context) (string, error) {
-			tok, _, err := signin.IssueFor(cfg.DauthDID, []string{hostSrv.URL}, 5*time.Minute)
+		Host: &OrgHost{BaseURL: hostSrv.URL, Key: selfKey, Identity: func(ctx context.Context) (string, error) {
+			tok, _, err := signin.IssueFor(token.Request{DID: cfg.DauthDID, Audience: []string{hostSrv.URL}, Scopes: []string{"read"}, JKT: selfKey.Thumbprint()}, 5*time.Minute)
 			return tok, err
 		}},
 		Assertions: &AssertionVerifier{
@@ -204,10 +206,24 @@ func newEnv(t *testing.T) *env {
 	return &env{ts: ts, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, keys: keys, now: now}
 }
 
-// identity is did's identity token addressed to the exchange.
+// identity is did's identity token addressed to the exchange, with the read
+// scope and bound to the env's DPoP key.
 func (e *env) identity(t *testing.T, did string) string {
 	t.Helper()
-	tok, _, err := e.signin.Issue(did, []string{exchangeURL})
+	return e.issue(t, token.Request{DID: did, Audience: []string{exchangeURL}})
+}
+
+// issue mints an identity token for req, filling in the read scope and the
+// env's key where req leaves them empty.
+func (e *env) issue(t *testing.T, req token.Request) string {
+	t.Helper()
+	if req.Scopes == nil {
+		req.Scopes = []string{"read"}
+	}
+	if req.JKT == "" {
+		req.JKT = e.key.Thumbprint()
+	}
+	tok, _, err := e.signin.Issue(req)
 	require.NoError(t, err)
 	return tok
 }
@@ -222,10 +238,10 @@ func (e *env) exchange(t *testing.T, identity string, proof bool, body any) (int
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	if identity != "" {
-		req.Header.Set("Authorization", "Bearer "+identity)
+		req.Header.Set("Authorization", "DPoP "+identity)
 	}
 	if proof {
-		p, err := e.key.Proof(http.MethodPost, "https://auth.test/exchange", "", time.Now())
+		p, err := e.key.Proof(http.MethodPost, "https://auth.test/exchange", identity, time.Now())
 		require.NoError(t, err)
 		req.Header.Set(dpop.HeaderName, p)
 	}
@@ -323,7 +339,7 @@ func TestExchangeMintsGrantsFromCoverage(t *testing.T) {
 
 	// Authenticated to the host as dauth's own DID.
 	var self jwt.RegisteredClaims
-	_, _, err := jwt.NewParser().ParseUnverified(e.host.auth[0][len("Bearer "):], &self)
+	_, _, err := jwt.NewParser().ParseUnverified(e.host.auth[0][len("DPoP "):], &self)
 	require.NoError(t, err)
 	assert.Equal(t, "did:dimo:dauth", self.Subject)
 	assert.Equal(t, jwt.ClaimStrings{e.hostSrv.URL}, self.Audience)
@@ -358,21 +374,49 @@ func TestExchangeRefusals(t *testing.T) {
 	t.Run("identity token from another issuer", func(t *testing.T) {
 		otherKeys, _ := newKeySet(t)
 		other := token.NewIssuer(token.Config{Keys: otherKeys, Issuer: signinIssuer, Audience: []string{"dimo"}, TTL: time.Hour})
-		tok, _, err := other.Issue(callerDID, nil)
+		tok, _, err := other.Issue(token.Request{DID: callerDID, Audience: []string{exchangeURL}, Scopes: []string{"read"}, JKT: e.key.Thumbprint()})
 		require.NoError(t, err)
 		status, body := e.exchange(t, tok, true, request)
 		assert.Equal(t, http.StatusUnauthorized, status, body)
 	})
 
 	t.Run("identity token for another audience", func(t *testing.T) {
-		tok, _, err := e.signin.Issue(callerDID, []string{"https://orghost.test"})
-		require.NoError(t, err)
+		tok := e.issue(t, token.Request{DID: callerDID, Audience: []string{"https://orghost.test"}})
 		status, body := e.exchange(t, tok, true, request)
 		assert.Equal(t, http.StatusUnauthorized, status, body)
-		tok, _, err = e.signin.Issue(callerDID, nil)
-		require.NoError(t, err)
+		tok = e.issue(t, token.Request{DID: callerDID})
 		status, body = e.exchange(t, tok, true, request)
 		assert.Equal(t, http.StatusUnauthorized, status, body, "the default audience is not the exchange")
+	})
+
+	t.Run("an identity token without the read scope", func(t *testing.T) {
+		tok := e.issue(t, token.Request{DID: callerDID, Audience: []string{exchangeURL}, Scopes: []string{"write"}})
+		status, body := e.exchange(t, tok, true, request)
+		assert.Equal(t, http.StatusForbidden, status, body)
+		assert.Equal(t, "insufficient_scope", body["error"])
+	})
+
+	t.Run("an identity token bound to another key", func(t *testing.T) {
+		other, err := dpop.GenerateKey()
+		require.NoError(t, err)
+		tok := e.issue(t, token.Request{DID: callerDID, Audience: []string{exchangeURL}, JKT: other.Thumbprint()})
+		status, body := e.exchange(t, tok, true, request)
+		assert.Equal(t, http.StatusUnauthorized, status, body, "a copied identity token mints nothing without its key")
+	})
+
+	t.Run("an identity token under the Bearer scheme", func(t *testing.T) {
+		raw, err := json.Marshal(request)
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPost, e.ts.URL+"/exchange", bytes.NewReader(raw))
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+identity)
+		p, err := e.key.Proof(http.MethodPost, "https://auth.test/exchange", identity, time.Now())
+		require.NoError(t, err)
+		req.Header.Set(dpop.HeaderName, p)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	})
 
 	t.Run("no DPoP proof", func(t *testing.T) {
@@ -484,9 +528,7 @@ func TestExchangeClientAssertion(t *testing.T) {
 	})
 
 	t.Run("an identity token is not an assertion", func(t *testing.T) {
-		tok, _, err := e.signin.Issue(fleetApp.did, []string{exchangeURL})
-		require.NoError(t, err)
-		refused(t, tok, http.StatusUnauthorized)
+		refused(t, e.issue(t, token.Request{DID: fleetApp.did, Audience: []string{exchangeURL}}), http.StatusUnauthorized)
 	})
 
 	t.Run("lifetimes", func(t *testing.T) {

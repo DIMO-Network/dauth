@@ -49,7 +49,8 @@ type Config struct {
 
 	// Lifetimes.
 	ChallengeTTL time.Duration // CHALLENGE_TTL
-	TokenTTL     time.Duration // TOKEN_TTL
+	TokenTTL     time.Duration // TOKEN_TTL: identity tokens without the approve scope
+	ApproveTTL   time.Duration // APPROVE_TOKEN_TTL: tokens carrying approve, kept short
 
 	// Signing keys, in priority order: the first is the active signer; the
 	// rest are retiring keys kept in the JWKS so their tokens still verify
@@ -124,7 +125,10 @@ func Load() (Config, error) {
 	if s.ChallengeTTL, err = envx.Duration("CHALLENGE_TTL", 5*time.Minute); err != nil {
 		return s, err
 	}
-	if s.TokenTTL, err = envx.Duration("TOKEN_TTL", time.Hour); err != nil {
+	if s.TokenTTL, err = envx.Duration("TOKEN_TTL", 15*time.Minute); err != nil {
+		return s, err
+	}
+	if s.ApproveTTL, err = envx.Duration("APPROVE_TOKEN_TTL", 5*time.Minute); err != nil {
 		return s, err
 	}
 

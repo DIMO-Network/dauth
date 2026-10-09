@@ -49,9 +49,9 @@ func NewPostgres(ctx context.Context, db *pgxpool.Pool, log zerolog.Logger) (*Po
 // store unavailable.
 func (p *Postgres) Put(ctx context.Context, id string, ch Challenge) error {
 	_, err := p.db.Exec(ctx,
-		`INSERT INTO nonce_challenges (nonce, message, did, expires_at, audience)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		id, ch.Message, ch.DID, ch.ExpiresAt, ch.Audience)
+		`INSERT INTO nonce_challenges (nonce, message, did, expires_at, audience, scopes, jkt)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		id, ch.Message, ch.DID, ch.ExpiresAt, ch.Audience, ch.Scopes, ch.JKT)
 	if err != nil {
 		return fmt.Errorf("storing challenge: %w", err)
 	}
@@ -68,11 +68,13 @@ func (p *Postgres) Consume(ctx context.Context, id string) (Challenge, error) {
 		did     string
 		expires time.Time
 		aud     []string
+		scopes  []string
+		jkt     string
 	)
 	err := p.db.QueryRow(ctx,
 		`DELETE FROM nonce_challenges WHERE nonce = $1
-		 RETURNING message, did, expires_at, audience`, id).
-		Scan(&msg, &did, &expires, &aud)
+		 RETURNING message, did, expires_at, audience, scopes, jkt`, id).
+		Scan(&msg, &did, &expires, &aud, &scopes, &jkt)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Challenge{}, ErrNotFound
@@ -87,6 +89,8 @@ func (p *Postgres) Consume(ctx context.Context, id string) (Challenge, error) {
 		DID:       did,
 		ExpiresAt: expires,
 		Audience:  aud,
+		Scopes:    scopes,
+		JKT:       jkt,
 	}, nil
 }
 

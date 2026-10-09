@@ -12,6 +12,8 @@ import (
 	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/signin/nonce"
 	"github.com/DIMO-Network/dauth/internal/signin/token"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	"github.com/DIMO-Network/did-directory/pkg/identity"
 	"github.com/rs/zerolog"
 )
 
@@ -24,11 +26,18 @@ const defaultKeyFragment = "signing"
 // document fragment can be.
 var fragmentPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
+// jktPattern is a SHA-256 thumbprint in base64url without padding.
+var jktPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
 // Handlers serves the sign-in endpoints.
 type Handlers struct {
 	Store    nonce.Store
 	Verifier *Verifier
 	Issuer   *token.Issuer
+	// DPoP checks the proof /token takes from the key the token will be
+	// bound to, and TokenURL is the public URL of /token that proof names.
+	DPoP     *dpop.Verifier
+	TokenURL string
 
 	Domain       string // shown in the challenge text
 	ChallengeTTL time.Duration
@@ -58,6 +67,12 @@ type challengeRequest struct {
 	// value must be on the server's allow-list (SIGNIN_ALLOWED_AUDIENCES) or the
 	// challenge is rejected. Omit it to receive the configured default audience.
 	Audience []string `json:"audience,omitempty"`
+	// Scope is what the token may do: space-separated, one or more of read,
+	// write and approve (did-directory pkg/identity). Required.
+	Scope string `json:"scope"`
+	// JKT is the RFC 7638 thumbprint of the DPoP key the token will be bound
+	// to; /token takes a proof from that key. Required.
+	JKT string `json:"jkt"`
 }
 
 type challengeResponse struct {
@@ -80,6 +95,7 @@ type tokenResponse struct {
 	Token     string `json:"token"`
 	TokenType string `json:"token_type"`
 	ExpiresIn int    `json:"expires_in"`
+	Scope     string `json:"scope"`
 }
 
 // errorResponse is the OAuth-style error body returned on failure. Clients
@@ -112,6 +128,15 @@ func (h *Handlers) Challenge() http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid_request", "requested audience is not allowed")
 			return
 		}
+		scopes, err := identity.ParseScope(req.Scope)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_scope", err.Error())
+			return
+		}
+		if !jktPattern.MatchString(req.JKT) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "jkt must be the base64url SHA-256 thumbprint of the DPoP key")
+			return
+		}
 
 		id, err := nonce.New()
 		if err != nil {
@@ -122,7 +147,11 @@ func (h *Handlers) Challenge() http.Handler {
 
 		now := h.now().UTC()
 		expiresAt := now.Add(h.ChallengeTTL)
-		msg := challengeText(h.Domain, req.DID, id, now, expiresAt)
+		aud := req.Audience
+		if len(aud) == 0 {
+			aud = h.Issuer.DefaultAudience()
+		}
+		msg := challengeText(h.Domain, req.DID, aud, scopes, req.JKT, id, now, expiresAt)
 
 		// The store is keyed by the nonce, which the client returns to /token.
 		if err := h.Store.Put(r.Context(), id, nonce.Challenge{
@@ -130,6 +159,8 @@ func (h *Handlers) Challenge() http.Handler {
 			DID:       req.DID,
 			ExpiresAt: expiresAt,
 			Audience:  req.Audience,
+			Scopes:    scopes,
+			JKT:       req.JKT,
 		}); err != nil {
 			h.Log.Warn().Err(err).Msg("storing challenge")
 			writeError(w, http.StatusServiceUnavailable, "server_error", "challenge store unavailable, retry shortly")
@@ -146,10 +177,13 @@ func (h *Handlers) Challenge() http.Handler {
 
 // challengeText is what the key signs. It names the domain, the DID, the
 // nonce and the validity so a signature cannot be repurposed for another
-// service, another identity or a later time.
-func challengeText(domain, did, nonce string, issued, expires time.Time) string {
-	return fmt.Sprintf("%s wants you to sign in as\n%s\n\nNonce: %s\nIssued At: %s\nExpiration Time: %s",
-		domain, did, nonce, issued.Format(time.RFC3339), expires.Format(time.RFC3339))
+// service, another identity or a later time, and the token's audience, scope
+// and key so the DID signs for exactly what the token will allow and who may
+// hold it.
+func challengeText(domain, did string, audience, scopes []string, jkt, nonce string, issued, expires time.Time) string {
+	return fmt.Sprintf("%s wants you to sign in as\n%s\n\nFor: %s\nScope: %s\nKey: %s\n\nNonce: %s\nIssued At: %s\nExpiration Time: %s",
+		domain, did, strings.Join(audience, ", "), identity.FormatScope(scopes), jkt,
+		nonce, issued.Format(time.RFC3339), expires.Format(time.RFC3339))
 }
 
 // Token verifies a signed challenge and returns an identity token.
@@ -180,9 +214,27 @@ func (h *Handlers) Token() http.Handler {
 		// Look the challenge up by nonce and consume it. Single-use: a replayed
 		// nonce, an expired challenge, or an unknown nonce all surface
 		// identically as invalid_grant.
+		// The proof shows the caller holds the key the challenge named. It is
+		// checked before the nonce is consumed, so a request without one
+		// does not burn the challenge.
+		proof := r.Header.Get(dpop.HeaderName)
+		if proof == "" {
+			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "a DPoP proof from the key the challenge names is required")
+			return
+		}
+		jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.TokenURL, "")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
+			return
+		}
+
 		ch, err := h.Store.Consume(r.Context(), req.Nonce)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid_grant", "challenge not found, already used, or expired")
+			return
+		}
+		if jkt != ch.JKT {
+			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "the DPoP proof is not from the key the challenge names")
 			return
 		}
 
@@ -208,7 +260,7 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 
-		tok, _, err := h.Issuer.Issue(ch.DID, ch.Audience)
+		tok, _, err := h.Issuer.Issue(token.Request{DID: ch.DID, Audience: ch.Audience, Scopes: ch.Scopes, JKT: ch.JKT})
 		if err != nil {
 			h.Log.Error().Err(err).Msg("issuing token")
 			writeError(w, http.StatusInternalServerError, "server_error", "could not issue token")
@@ -217,8 +269,9 @@ func (h *Handlers) Token() http.Handler {
 
 		writeJSON(w, http.StatusOK, tokenResponse{
 			Token:     tok,
-			TokenType: "Bearer",
-			ExpiresIn: int(h.Issuer.TTL().Seconds()),
+			TokenType: dpop.TokenType,
+			ExpiresIn: int(h.Issuer.TTLFor(ch.Scopes).Seconds()),
+			Scope:     identity.FormatScope(ch.Scopes),
 		})
 	})
 }

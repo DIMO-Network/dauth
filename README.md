@@ -40,7 +40,8 @@ verification) are consumed by downstream repos.
 
 ```
 client                                     dauth                          DID directory
-  │  POST /signin/challenge {did}            │                                  │
+  │  POST /signin/challenge                  │                                  │
+  │    {did, audience, scope, jkt}           │                                  │
   │ ────────────────────────────────────────▶  single-use nonce, challenge text  │
   │  ◀────────────────────────────────────── { challenge, nonce, expires_at }    │
   │                                          │                                  │
@@ -48,7 +49,8 @@ client                                     dauth                          DID di
   │  #signing key (ECDSA, base64url r||s)    │                                  │
   │                                          │                                  │
   │  POST /signin/token {nonce, signature}   │                                  │
-  │ ────────────────────────────────────────▶  consume nonce                    │
+  │  DPoP: <proof from the jkt key>          │                                  │
+  │ ────────────────────────────────────────▶  check proof, consume nonce       │
   │                                          │  GET /:did ──────────────────────▶
   │                                          │  ◀── DID document                │
   │                                          │  verify against #signing         │
@@ -62,13 +64,27 @@ a DID whose key is in the CLI keystore. The key is resolved at token time, so
 a rotated-out key stops signing in immediately. `#dimo_org`, an org's
 repository commit key, is never accepted as a login key.
 
+A token is good for what the DID signed for and only in the hands of one key.
+The challenge text names the audience, the scope and the thumbprint of a DPoP
+key, so the signature covers all three; `/signin/token` takes a proof from that
+key; and every service that accepts the token wants it under the `DPoP` scheme
+with a fresh proof from the same key. A copied token is useless without the
+key, and a dashboard that only reads signs in with `read` and cannot write.
+The profile is did-directory's `pkg/identity`; proofs are its `pkg/dpop`.
+
 ## API
 
 ### `POST /signin/challenge`
 
 ```json
-{ "did": "did:dimo:…", "audience": ["https://orghost.dimo.zone"] }
+{ "did": "did:dimo:…", "audience": ["https://orghost.dimo.zone"], "scope": "read write", "jkt": "<RFC 7638 thumbprint>" }
 ```
+
+`scope` is required: one or more of `read` (reads, `/authorize`, and what the
+exchange requires), `write` (record writes, withdrawing a pending write) and
+`approve` (approving a pending write, `revoke-authored-by`, registering a
+repository), space-separated. `jkt` is required: the thumbprint of the DPoP
+key the token will be bound to. An unknown scope is `invalid_scope`.
 
 `audience` names the service the token is for, and every service that takes
 these tokens checks it: the exchange accepts only `<PUBLIC_BASE_URL>/exchange`,
@@ -83,9 +99,13 @@ else must be on `SIGNIN_ALLOWED_AUDIENCES`. Omitted, the token carries
 { "nonce": "…", "signature": "<base64url r||s>", "key": "signing" }
 ```
 
-`key` is the verification method fragment, default `signing`. Returns
-`{ token, token_type: "Bearer", expires_in }`. Errors are OAuth-style
-`{ error, error_description }`: `invalid_request` (400), `invalid_grant` (401:
+`key` is the verification method fragment, default `signing`. The request
+carries `DPoP: <proof>` for `POST <PUBLIC_BASE_URL>/signin/token` from the key
+the challenge named; a missing proof does not spend the challenge. Returns
+`{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
+`APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
+`{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`
+(400), `invalid_grant` (401:
 bad nonce, bad signature, unknown DID or key), `server_error` (503 when the
 directory or challenge store is unavailable; get a fresh challenge and retry).
 
@@ -96,8 +116,9 @@ directory or challenge store is unavailable; get a fresh challenge and retry).
 
 ## Token
 
-Registered claims only: `iss`, `sub` (the DID), `aud`, `iat`, `nbf`, `exp`,
-`jti`. RS256, `kid` = RFC 7638 thumbprint of the signing key.
+`iss`, `sub` (the DID), `aud`, `iat`, `nbf`, `exp`, `jti`, `scope`
+(space-separated) and `cnf: {jkt}`. RS256, `kid` = RFC 7638 thumbprint of the
+signing key.
 
 ---
 
@@ -108,12 +129,12 @@ Registered claims only: `iss`, `sub` (the DID), `aud`, `iat`, `nbf`, `exp`,
 ```
 client                                dauth                               org host
   │  POST /exchange                     │                                      │
-  │  Authorization: Bearer <identity>   │                                      │
-  │  DPoP: <proof for POST /exchange>   │                                      │
+  │  Authorization: DPoP <identity>     │                                      │
+  │  DPoP: <proof, ath = identity>      │                                      │
   │  {grant, vehicle, abilities}        │                                      │
   │ ───────────────────────────────────▶  verify identity token (sub = caller, │
   │                                     │    aud = <PUBLIC_BASE_URL>/exchange) │
-  │                                     │  verify DPoP proof → jkt             │
+  │                                     │  verify DPoP proof → jkt = cnf.jkt   │
   │                                     │  POST /authorize as DAUTH_DID ───────▶
   │                                     │  {uri, caller, vehicle, abilities}   │
   │                                     │  ◀── coverage | 403 {code}           │
@@ -122,18 +143,21 @@ client                                dauth                               org ho
 ```
 
 dauth calls the host with an identity token for its own DID (`DAUTH_DID`),
-minted by the sign-in issuer; the host lists that DID in `ISSUER_DIDS` and
-reads dauth's keys from `…/signin/keys`.
+minted by the sign-in issuer with the `read` scope and bound to a key dauth
+generates at startup; the host lists that DID in `ISSUER_DIDS` and reads
+dauth's keys from `…/signin/keys`.
 
 ## API
 
 ### `POST /exchange`
 
-Headers: `Authorization: Bearer <identity token>`, addressed to
-`<PUBLIC_BASE_URL>/exchange`, and `DPoP: <proof>`. The
-proof is an RFC 9449 proof JWT (ES256 or RS256, `typ: dpop+jwt`, public key in
-`jwk`, claims `jti`, `htm: POST`, `htu: <PUBLIC_BASE_URL>/exchange`, `iat`
-within five minutes). `pkg/dpop.Key.Proof` makes one.
+Headers: `Authorization: DPoP <identity token>`, addressed to
+`<PUBLIC_BASE_URL>/exchange` and carrying the `read` scope, and
+`DPoP: <proof>`. The proof is an RFC 9449 proof JWT (ES256 or RS256,
+`typ: dpop+jwt`, public key in `jwk`, claims `jti`, `htm: POST`,
+`htu: <PUBLIC_BASE_URL>/exchange`, `iat` within five minutes, and `ath`, the
+identity token's hash) from the key the identity token is bound to; the access
+token is bound to it too. did-directory's `pkg/dpop.Key.Proof` makes one.
 
 ```json
 {
@@ -221,7 +245,7 @@ arithmetic.
 | `JWT_AUDIENCE` | yes | | Default `aud` of identity tokens (comma-separated) |
 | `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead |
 | `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active |
-| `CHALLENGE_TTL`, `TOKEN_TTL` | | `5m`, `1h` | Lifetimes |
+| `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, `5m` | Lifetimes; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` |
 | `DATABASE_URL` | | | Postgres challenge store; unset = in-memory, single replica |
 | `EXCHANGE_ISSUER` | yes | | `iss` of access tokens |
 | `EXCHANGE_AUDIENCE` | | `dq` | Default `aud` of access tokens |

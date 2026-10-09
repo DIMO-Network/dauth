@@ -44,6 +44,8 @@ func TestPostgres_PutConsume(t *testing.T) {
 		DID:       "did:dimo:0xc0ffee254729296a45a3885639AC7E10F9d54979",
 		ExpiresAt: time.Now().Add(time.Minute).UTC().Truncate(time.Microsecond),
 		Audience:  []string{"step-ca"},
+		Scopes:    []string{"read", "write"},
+		JKT:       "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I",
 	}
 	require.NoError(t, p.Put(ctx, "nonce-1", ch))
 
@@ -53,12 +55,14 @@ func TestPostgres_PutConsume(t *testing.T) {
 	assert.Equal(t, ch.Message, got.Message)
 	assert.True(t, ch.ExpiresAt.Equal(got.ExpiresAt))
 	assert.Equal(t, ch.Audience, got.Audience)
+	assert.Equal(t, ch.Scopes, got.Scopes)
+	assert.Equal(t, ch.JKT, got.JKT)
 }
 
 func TestPostgres_SingleUse(t *testing.T) {
 	ctx := context.Background()
 	p := newTestPostgres(t)
-	require.NoError(t, p.Put(ctx, "n", Challenge{
+	require.NoError(t, p.Put(ctx, "n", Challenge{Scopes: []string{"read"}, JKT: "k",
 		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 
@@ -79,7 +83,7 @@ func TestPostgres_Expired(t *testing.T) {
 	ctx := context.Background()
 	p := newTestPostgres(t)
 	now := time.Now()
-	require.NoError(t, p.Put(ctx, "n", Challenge{
+	require.NoError(t, p.Put(ctx, "n", Challenge{Scopes: []string{"read"}, JKT: "k",
 		Message: "m", DID: "did:dimo:0x01", ExpiresAt: now.Add(time.Minute),
 	}))
 
@@ -95,7 +99,7 @@ func TestPostgres_Expired(t *testing.T) {
 func TestPostgres_ConcurrentConsume(t *testing.T) {
 	ctx := context.Background()
 	p := newTestPostgres(t)
-	require.NoError(t, p.Put(ctx, "n", Challenge{
+	require.NoError(t, p.Put(ctx, "n", Challenge{Scopes: []string{"read"}, JKT: "k",
 		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 

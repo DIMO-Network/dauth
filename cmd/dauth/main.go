@@ -34,8 +34,9 @@ import (
 	"github.com/DIMO-Network/dauth/internal/signin/nonce"
 	"github.com/DIMO-Network/dauth/internal/signin/server"
 	"github.com/DIMO-Network/dauth/internal/signin/token"
-	"github.com/DIMO-Network/dauth/pkg/dpop"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	idprofile "github.com/DIMO-Network/did-directory/pkg/identity"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
@@ -79,7 +80,7 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL})
+	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL, ApproveTTL: cfg.ApproveTTL})
 	signinHandler, err := buildSignin(ctx, cfg, relyingParties(cfg, exchangeCfg), signinKeys, issuer, log)
 	if err != nil {
 		return err
@@ -145,6 +146,8 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 		Domain:           cfg.Domain,
 		ChallengeTTL:     cfg.ChallengeTTL,
 		AllowedAudiences: audiences,
+		DPoP:             dpop.NewVerifier(),
+		TokenURL:         cfg.PublicBaseURL + "/signin/token",
 		Log:              log,
 	}
 
@@ -177,6 +180,12 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 		return exchange.Surface{}, err
 	}
 
+	// dauth's own token only asks the host questions, and is bound to a key
+	// that never leaves this process.
+	selfKey, err := dpop.GenerateKey()
+	if err != nil {
+		return exchange.Surface{}, err
+	}
 	var mu sync.Mutex
 	var selfToken string
 	var selfExp time.Time
@@ -186,7 +195,9 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 		if selfToken != "" && time.Now().Before(selfExp.Add(-time.Minute)) {
 			return selfToken, nil
 		}
-		tok, exp, err := issuer.IssueFor(ecfg.DauthDID, []string{ecfg.OrgHostURL}, selfTokenTTL)
+		tok, exp, err := issuer.IssueFor(token.Request{
+			DID: ecfg.DauthDID, Audience: []string{ecfg.OrgHostURL}, Scopes: []string{idprofile.ScopeRead}, JKT: selfKey.Thumbprint(),
+		}, selfTokenTTL)
 		if err != nil {
 			return "", err
 		}
@@ -201,6 +212,7 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 		Host: &exchange.OrgHost{
 			BaseURL:  ecfg.OrgHostURL,
 			Identity: self,
+			Key:      selfKey,
 			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
 		},
 		Assertions: &exchange.AssertionVerifier{
