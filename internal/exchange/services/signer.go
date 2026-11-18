@@ -14,9 +14,11 @@ import (
 )
 
 // PrivilegeTokenDTO is the input to minting a permission token: the validated
-// access request plus the audience and subject to stamp on the output.
+// access request, the access decision it produced, plus the audience and
+// subject to stamp on the output.
 type PrivilegeTokenDTO struct {
 	*access.AccessRequest
+	Decision        *access.Decision
 	Audience        []string
 	ResponseSubject string
 }
@@ -42,11 +44,32 @@ func NewTokenSigner(keys *keyset.KeySet, issuer string, ttl time.Duration) *Toke
 // custom-claim construction mirrors the previous DEX path exactly (including the
 // deprecated contract_address/token_id/privilege_ids block) to keep the wire
 // format byte-compatible for existing consumers.
+//
+// Permissions the decision marks as scoped are minted ONLY into the
+// scoped_permissions claim — excluded from the flat permissions array and the
+// deprecated privilege_ids — so a consumer that does not understand their
+// constraints cannot mistake them for unconditional grants.
 func (s *TokenSigner) SignPrivilegePayload(_ context.Context, req PrivilegeTokenDTO) (string, error) {
-	privs := make([]privileges.Privilege, len(req.Permissions))
-	for i, perm := range req.Permissions {
+	var scoped []tokenclaims.ScopedPermission
+	if req.Decision != nil {
+		scoped = req.Decision.ScopedPermissions
+	}
+	scopedNames := make(map[string]struct{}, len(scoped))
+	for _, sp := range scoped {
+		scopedNames[sp.Name] = struct{}{}
+	}
+
+	flat := make([]string, 0, len(req.Permissions))
+	privs := make([]privileges.Privilege, 0, len(req.Permissions))
+	for _, perm := range req.Permissions {
+		if _, ok := scopedNames[perm]; ok {
+			continue
+		}
+		flat = append(flat, perm)
 		if permID, ok := tokenclaims.PrivilegeNameToID[perm]; ok {
-			privs[i] = privileges.Privilege(permID)
+			privs = append(privs, privileges.Privilege(permID))
+		} else {
+			privs = append(privs, 0)
 		}
 	}
 
@@ -72,9 +95,10 @@ func (s *TokenSigner) SignPrivilegePayload(_ context.Context, req PrivilegeToken
 			ID:        uuid.NewString(),
 		},
 		CustomClaims: tokenclaims.CustomClaims{
-			Asset:       req.Asset.String(),
-			Permissions: req.Permissions,
-			CloudEvents: &tokenclaims.CloudEvents{Events: events},
+			Asset:             req.Asset.String(),
+			Permissions:       flat,
+			ScopedPermissions: scoped,
+			CloudEvents:       &tokenclaims.CloudEvents{Events: events},
 
 			// Deprecated fields, retained until downstream services migrate.
 			ContractAddress: req.Asset.GetContractAddress(),

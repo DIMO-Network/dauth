@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dauth/internal/exchange/autheval"
@@ -59,6 +60,15 @@ type AccessRequest struct { //nolint:revive
 	// EventFilters contains requests for access to CloudEvents attached to the specified asset.
 	EventFilters []models.EventFilter `json:"eventFilters"`
 }
+
+// Decision describes a successful access validation. ScopedPermissions lists
+// the requested permissions that were granted subject to constraint atoms
+// from the backing grant; requested permissions absent from it were granted
+// unconditionally. Legacy grant formats cannot express constraints, so those
+// paths always yield an empty Decision.
+type Decision struct {
+	ScopedPermissions []tokenclaims.ScopedPermission
+}
 type Service struct {
 	sacdContract                SACDInterface
 	ipfsClient                  IPFSClient
@@ -81,21 +91,25 @@ func NewAccessService(ipfsService IPFSClient,
 	}, nil
 }
 
-func (s *Service) ValidateAccess(ctx context.Context, accessReq *AccessRequest, ethAddr common.Address) error {
-	err := s.ValidateAccessViaSourceDoc(ctx, accessReq, ethAddr)
+func (s *Service) ValidateAccess(ctx context.Context, accessReq *AccessRequest, ethAddr common.Address) (*Decision, error) {
+	decision, err := s.ValidateAccessViaSourceDoc(ctx, accessReq, ethAddr)
 	if err != nil {
 		if len(accessReq.EventFilters) != 0 {
-			return err
+			return nil, err
 		}
 		// TODO(elffjs): This is in debug for now because all prod grants are in an old format.
 		logger := zerolog.Ctx(ctx)
 		logger.Debug().Err(err).Msg("Failed to get valid SACD document, falling back to legacy permissions")
-		return s.ValidateAccessViaRecord(ctx, accessReq, ethAddr) // fallback to legacy check if no event filters
+		// Legacy on-chain permission bits cannot carry constraints.
+		if err := s.ValidateAccessViaRecord(ctx, accessReq, ethAddr); err != nil {
+			return nil, err
+		}
+		return &Decision{}, nil
 	}
-	return nil
+	return decision, nil
 }
 
-func (s *Service) ValidateAccessViaSourceDoc(ctx context.Context, accessReq *AccessRequest, ethAddr common.Address) error {
+func (s *Service) ValidateAccessViaSourceDoc(ctx context.Context, accessReq *AccessRequest, ethAddr common.Address) (*Decision, error) {
 	opts := &bind.CallOpts{
 		Context: ctx,
 	}
@@ -108,7 +122,7 @@ func (s *Service) ValidateAccessViaSourceDoc(ctx context.Context, accessReq *Acc
 		resPermRecord, err = s.sacdContract.CurrentPermissionRecord(opts, accessReq.Asset.GetContractAddress(), accessReq.Asset.GetTokenID(), ethAddr)
 	}
 	if err != nil {
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusInternalServerError,
 			Err:         err,
 			ExternalMsg: "Failed to get permission record",
@@ -117,15 +131,20 @@ func (s *Service) ValidateAccessViaSourceDoc(ctx context.Context, accessReq *Acc
 
 	record, err := s.ipfsClient.GetValidSacdDoc(ctx, resPermRecord.Source)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return s.evaluateSacdDoc(ctx, record, accessReq, ethAddr)
 }
 
-func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEvent, accessReq *AccessRequest, grantee common.Address) error {
+func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEvent, accessReq *AccessRequest, grantee common.Address) (*Decision, error) {
+	// New-style grants carry an ODRL Agreement and dispatch on the CloudEvent
+	// envelope type; everything below is the legacy SACDData format.
+	if record.Type == models.TypeSACDODRL {
+		return s.evaluateODRLDoc(ctx, record, accessReq, grantee)
+	}
 	var data models.SACDData
 	if err := json.Unmarshal(record.Data, &data); err != nil {
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusBadRequest,
 			Err:         err,
 			ExternalMsg: "failed to parse agreement data",
@@ -133,7 +152,7 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 	}
 
 	if data.Grantee.Address != grantee.Hex() {
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusForbidden,
 			ExternalMsg: "Grantee address in permission record doesn't match requester",
 		}
@@ -142,9 +161,9 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 	valid, err := s.sigValidator.ValidateSignature(ctx, record.Data, record.Signature, common.HexToAddress(data.Grantor.Address))
 	if err != nil {
 		if richerrors.IsRichError(err) {
-			return fmt.Errorf("failed to validate grant signature: %w", err)
+			return nil, fmt.Errorf("failed to validate grant signature: %w", err)
 		}
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusInternalServerError,
 			Err:         err,
 			ExternalMsg: "failed to validate grant signature",
@@ -152,7 +171,7 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 	}
 
 	if !valid {
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusForbidden,
 			ExternalMsg: "invalid grant signature",
 		}
@@ -160,7 +179,7 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 
 	userPermGrants, cloudEvtGrants, err := autheval.UserGrantMap(ctx, &data, accessReq.Asset, s.templateService)
 	if err != nil {
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusInternalServerError,
 			Err:         err,
 			ExternalMsg: "failed to generate user grant map",
@@ -168,7 +187,7 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 	}
 
 	if err := autheval.EvaluateCloudEvents(cloudEvtGrants, accessReq.EventFilters); err != nil {
-		return richerrors.Error{
+		return nil, richerrors.Error{
 			Code:        http.StatusForbidden,
 			Err:         err,
 			ExternalMsg: "failed to evaluate cloudevents",
@@ -176,9 +195,94 @@ func (s *Service) evaluateSacdDoc(ctx context.Context, record *cloudevent.RawEve
 	}
 
 	if lacks := autheval.EvaluatePermissions(userPermGrants, accessReq.Permissions); len(lacks) > 0 {
-		return missingPermissionsError(grantee, accessReq.Asset, lacks)
+		return nil, missingPermissionsError(grantee, accessReq.Asset, lacks)
 	}
-	return nil
+	// Legacy SACDData agreements grant permissions unconditionally; their
+	// per-agreement validity windows are consumed above at evaluation time.
+	return &Decision{}, nil
+}
+
+// evaluateODRLDoc evaluates a new-style SACD grant: an ODRL Agreement
+// restricted to DIMO profile v1 — assigner, assignee, target asset, a
+// validity period, and named permissions, each optionally narrowed by
+// dimo:recordedAt data-window constraints. The policy envelope (parties,
+// target, validity) is verified and consumed here; surviving per-permission
+// constraint atoms are forwarded verbatim in the decision for minting into
+// the token's scoped_permissions claim. CloudEvent-scoped access is not part
+// of profile v1 and any such request is refused.
+func (s *Service) evaluateODRLDoc(ctx context.Context, record *cloudevent.RawEvent, accessReq *AccessRequest, grantee common.Address) (*Decision, error) {
+	agreement, err := models.ParseODRLAgreement(record.Data)
+	if err != nil {
+		return nil, richerrors.Error{
+			Code:        http.StatusBadRequest,
+			Err:         err,
+			ExternalMsg: "failed to parse ODRL agreement",
+		}
+	}
+
+	assignee, err := cloudevent.DecodeEthrDID(agreement.Assignee)
+	if err != nil {
+		return nil, richerrors.Error{
+			Code:        http.StatusBadRequest,
+			Err:         err,
+			ExternalMsg: "assignee must be an ethr DID",
+		}
+	}
+	if assignee.ContractAddress != grantee {
+		return nil, richerrors.Error{
+			Code:        http.StatusForbidden,
+			ExternalMsg: "Assignee in agreement doesn't match requester",
+		}
+	}
+
+	assigner, err := cloudevent.DecodeEthrDID(agreement.Assigner)
+	if err != nil {
+		return nil, richerrors.Error{
+			Code:        http.StatusBadRequest,
+			Err:         err,
+			ExternalMsg: "assigner must be an ethr DID",
+		}
+	}
+	valid, err := s.sigValidator.ValidateSignature(ctx, record.Data, record.Signature, assigner.ContractAddress)
+	if err != nil {
+		if richerrors.IsRichError(err) {
+			return nil, fmt.Errorf("failed to validate grant signature: %w", err)
+		}
+		return nil, richerrors.Error{
+			Code:        http.StatusInternalServerError,
+			Err:         err,
+			ExternalMsg: "failed to validate grant signature",
+		}
+	}
+	if !valid {
+		return nil, richerrors.Error{
+			Code:        http.StatusForbidden,
+			ExternalMsg: "invalid grant signature",
+		}
+	}
+
+	// Profile v1 grants no CloudEvent access, so a request for any is refused
+	// rather than partially serviced.
+	if len(accessReq.EventFilters) != 0 {
+		return nil, richerrors.Error{
+			Code:        http.StatusForbidden,
+			ExternalMsg: "agreement grants no CloudEvent access",
+		}
+	}
+
+	grants, err := autheval.ODRLGrantMap(agreement, accessReq.Asset, time.Now())
+	if err != nil {
+		return nil, richerrors.Error{
+			Code:        http.StatusForbidden,
+			Err:         err,
+			ExternalMsg: "agreement does not authorize this request",
+		}
+	}
+	scoped, lacks := autheval.EvaluateScopedPermissions(grants, accessReq.Permissions)
+	if len(lacks) > 0 {
+		return nil, missingPermissionsError(grantee, accessReq.Asset, lacks)
+	}
+	return &Decision{ScopedPermissions: scoped}, nil
 }
 
 func (s *Service) ValidateAccessViaRecord(ctx context.Context, accessReq *AccessRequest, ethAddr common.Address) error {

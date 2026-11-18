@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dauth/internal/exchange/models"
 	"github.com/DIMO-Network/server-garage/pkg/richerrors"
 	"github.com/rs/zerolog"
 )
@@ -122,10 +123,10 @@ func (i *IPFSClient) GetValidSacdDoc(ctx context.Context, source string) (*cloud
 		}
 	}
 
-	if record.Type != cloudevent.TypeSACD && record.Type != cloudevent.TypeSACDTemplate {
+	if record.Type != cloudevent.TypeSACD && record.Type != cloudevent.TypeSACDTemplate && record.Type != models.TypeSACDODRL {
 		return nil, richerrors.Error{
 			Code:        http.StatusBadRequest,
-			ExternalMsg: fmt.Sprintf("invalid type: expected '%s' or '%s', got '%s'", cloudevent.TypeSACD, cloudevent.TypeSACDTemplate, record.Type),
+			ExternalMsg: fmt.Sprintf("invalid type: expected '%s', '%s', or '%s', got '%s'", cloudevent.TypeSACD, cloudevent.TypeSACDTemplate, models.TypeSACDODRL, record.Type),
 		}
 	}
 
