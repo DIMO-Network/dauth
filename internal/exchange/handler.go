@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dauth/internal/keyset"
-	"github.com/DIMO-Network/dauth/pkg/dpop"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -25,8 +25,11 @@ import (
 
 // Request is the body of POST /exchange.
 type Request struct {
-	// Grant is the at:// URI of the delegation the caller is exercising.
-	Grant string `json:"grant"`
+	// Grant is the at:// URI of the delegation the caller is exercising. Empty
+	// asks for the vehicle as its controller, or as a member of an org that
+	// controls it: a controller's root is implicit (spec §7), so there is no
+	// record to name.
+	Grant string `json:"grant,omitempty"`
 	// Vehicle is the vehicle DID the token is for.
 	Vehicle string `json:"vehicle"`
 	// Abilities are the abilities asked for; the token carries the subset the
@@ -84,7 +87,7 @@ func (h *Handler) now() time.Time {
 // ServeHTTP handles POST /exchange. The identity middleware has already put
 // the caller's DID in the context.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	caller, ok := CallerFromContext(r.Context())
+	who, ok := CallerFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid_token", "no authenticated caller")
 		return
@@ -98,11 +101,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "a DPoP proof header is required")
 		return
 	}
-	jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.ExchangeURL, "")
+	jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.ExchangeURL, who.Token)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
 		return
 	}
+	// One key from sign-in to data: the proof must come from the key the
+	// identity token is bound to, so the access token is bound to it too and
+	// a copied identity token mints nothing.
+	if jkt != who.JKT {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "the DPoP proof is not from the key the identity token is bound to")
+		return
+	}
+	caller := who.DID
 
 	var req Request
 	dec := json.NewDecoder(r.Body)
@@ -226,7 +237,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (r *Request) validate() error {
-	if !strings.HasPrefix(r.Grant, "at://") {
+	if r.Grant != "" && !strings.HasPrefix(r.Grant, "at://") {
 		return errors.New("grant must be an at:// record URI")
 	}
 	if !isDID(r.Vehicle) {

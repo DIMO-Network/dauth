@@ -26,6 +26,9 @@ func newTestKeySet(t *testing.T) *keyset.KeySet {
 	return ks
 }
 
+// testJKT stands in for a DPoP key's thumbprint.
+const testJKT = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+
 func TestIssueRoundTrip(t *testing.T) {
 	ks := newTestKeySet(t)
 	jwksRaw, err := ks.JWKS()
@@ -41,7 +44,7 @@ func TestIssueRoundTrip(t *testing.T) {
 	})
 
 	const did = "did:dimo:member"
-	signed, exp, err := iss.Issue(did, nil)
+	signed, exp, err := iss.Issue(Request{DID: did, Scopes: []string{"read"}, JKT: testJKT})
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(10*time.Minute), exp)
 
@@ -60,6 +63,9 @@ func TestIssueRoundTrip(t *testing.T) {
 	assert.Equal(t, did, claims.Subject)
 	assert.Equal(t, "https://auth.dimo.zone", claims.Issuer)
 	assert.NotEmpty(t, claims.ID, "jti must be set")
+	assert.Equal(t, "read", claims.Scope)
+	require.NotNil(t, claims.Cnf)
+	assert.Equal(t, testJKT, claims.Cnf.JKT)
 	assert.Equal(t, now.Unix(), claims.IssuedAt.Unix())
 	assert.Equal(t, now.Add(10*time.Minute).Unix(), claims.ExpiresAt.Unix())
 }
@@ -70,7 +76,7 @@ func TestIssue_RejectedAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	iss := NewIssuer(Config{Keys: ks, Issuer: "iss", Audience: []string{"a"}, TTL: time.Minute, Now: func() time.Time { return now }})
-	signed, _, err := iss.Issue("did:dimo:member", nil)
+	signed, _, err := iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}, JKT: testJKT})
 	require.NoError(t, err)
 
 	pub := firstJWKSPublicKey(t, jwksRaw)
@@ -97,7 +103,7 @@ func TestIssue_AudienceOverride(t *testing.T) {
 	pub := firstJWKSPublicKey(t, jwksRaw)
 
 	// Override wins.
-	signed, _, err := iss.Issue(did, []string{"step-ca"})
+	signed, _, err := iss.Issue(Request{DID: did, Audience: []string{"step-ca"}, Scopes: []string{"read"}, JKT: testJKT})
 	require.NoError(t, err)
 	var claims Claims
 	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithTimeFunc(func() time.Time { return now.Add(time.Minute) })).
@@ -106,7 +112,7 @@ func TestIssue_AudienceOverride(t *testing.T) {
 	assert.Equal(t, jwt.ClaimStrings{"step-ca"}, claims.Audience)
 
 	// Empty override falls back to the configured default.
-	signed, _, err = iss.Issue(did, nil)
+	signed, _, err = iss.Issue(Request{DID: did, Scopes: []string{"read"}, JKT: testJKT})
 	require.NoError(t, err)
 	claims = Claims{}
 	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithTimeFunc(func() time.Time { return now.Add(time.Minute) })).
@@ -120,4 +126,14 @@ func TestIssue_AudienceOverride(t *testing.T) {
 func firstJWKSPublicKey(t *testing.T, jwksRaw []byte) *rsa.PublicKey {
 	t.Helper()
 	return parseFirstRSAJWK(t, jwksRaw)
+}
+
+// TestIssueNeedsScopeAndKey: an identity token always says what it is for and
+// who may present it.
+func TestIssueNeedsScopeAndKey(t *testing.T) {
+	iss := NewIssuer(Config{Keys: newTestKeySet(t), Issuer: "iss", Audience: []string{"a"}, TTL: time.Minute})
+	_, _, err := iss.Issue(Request{DID: "did:dimo:member", JKT: testJKT})
+	assert.Error(t, err)
+	_, _, err = iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}})
+	assert.Error(t, err)
 }
