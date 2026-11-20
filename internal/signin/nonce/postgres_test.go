@@ -2,6 +2,7 @@ package nonce
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestPostgres_PutConsume(t *testing.T) {
 	p := newTestPostgres(t)
 
 	ch := Challenge{
-		Message:   "canonical siwe message",
+		Message:   "canonical challenge text",
 		DID:       "did:dimo:0xc0ffee254729296a45a3885639AC7E10F9d54979",
 		ExpiresAt: time.Now().Add(time.Minute).UTC().Truncate(time.Microsecond),
 		Audience:  []string{"step-ca"},
@@ -49,7 +50,7 @@ func TestPostgres_PutConsume(t *testing.T) {
 	}
 	require.NoError(t, p.Put(ctx, "nonce-1", ch))
 
-	got, err := p.Consume(ctx, "nonce-1")
+	got, err := p.Consume(ctx, "nonce-1", ch.JKT)
 	require.NoError(t, err)
 	assert.Equal(t, ch.DID, got.DID)
 	assert.Equal(t, ch.Message, got.Message)
@@ -66,16 +67,16 @@ func TestPostgres_SingleUse(t *testing.T) {
 		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 
-	_, err := p.Consume(ctx, "n")
+	_, err := p.Consume(ctx, "n", "k")
 	require.NoError(t, err)
 
-	_, err = p.Consume(ctx, "n")
+	_, err = p.Consume(ctx, "n", "k")
 	assert.ErrorIs(t, err, ErrNotFound, "a nonce must not be consumable twice")
 }
 
 func TestPostgres_Unknown(t *testing.T) {
 	p := newTestPostgres(t)
-	_, err := p.Consume(context.Background(), "never-issued")
+	_, err := p.Consume(context.Background(), "never-issued", "k")
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -90,7 +91,7 @@ func TestPostgres_Expired(t *testing.T) {
 	// Advance the store's clock past expiry; the row is still deleted but
 	// reported as missing.
 	p.now = func() time.Time { return now.Add(2 * time.Minute) }
-	_, err := p.Consume(ctx, "n")
+	_, err := p.Consume(ctx, "n", "k")
 	assert.ErrorIs(t, err, ErrNotFound, "an expired challenge must not be consumable")
 }
 
@@ -109,7 +110,7 @@ func TestPostgres_ConcurrentConsume(t *testing.T) {
 	for i := 0; i < racers; i++ {
 		go func() {
 			<-start
-			_, err := p.Consume(ctx, "n")
+			_, err := p.Consume(ctx, "n", "k")
 			results <- err
 		}()
 	}
@@ -124,4 +125,96 @@ func TestPostgres_ConcurrentConsume(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, wins, "exactly one consumer must win the nonce")
+}
+
+func TestPostgres_Peek(t *testing.T) {
+	ctx := context.Background()
+	p := newTestPostgres(t)
+	now := time.Now()
+	ch := Challenge{Scopes: []string{"read"}, JKT: "k", Audience: []string{"dimo"},
+		Message: "m", DID: "did:dimo:0x01", ExpiresAt: now.Add(time.Minute).UTC().Truncate(time.Microsecond),
+	}
+	require.NoError(t, p.Put(ctx, "n", ch))
+
+	for range 2 {
+		got, err := p.Peek(ctx, "n")
+		require.NoError(t, err)
+		assert.Equal(t, ch.Message, got.Message)
+		assert.Equal(t, ch.Audience, got.Audience)
+		assert.Equal(t, ch.JKT, got.JKT)
+	}
+	_, err := p.Peek(ctx, "never-issued")
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	p.now = func() time.Time { return now.Add(2 * time.Minute) }
+	_, err = p.Peek(ctx, "n")
+	assert.ErrorIs(t, err, ErrNotFound, "an expired challenge must not be peekable")
+	p.now = time.Now
+
+	_, err = p.Consume(ctx, "n", "k")
+	require.NoError(t, err, "peeking must leave the challenge consumable")
+	_, err = p.Peek(ctx, "n")
+	assert.ErrorIs(t, err, ErrNotFound, "a consumed challenge must not be peekable")
+}
+
+func TestPostgres_WrongKeyLeavesChallenge(t *testing.T) {
+	ctx := context.Background()
+	p := newTestPostgres(t)
+	require.NoError(t, p.Put(ctx, "n", Challenge{Scopes: []string{"read"}, JKT: "k",
+		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+
+	_, err := p.Consume(ctx, "n", "another-key")
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = p.Consume(ctx, "n", "k")
+	assert.NoError(t, err, "a consume naming another key must not spend the challenge")
+}
+
+// Replicas starting together all bootstrap the schema at once. Each run is in
+// a fresh, randomly named schema so the CREATE TABLE IF NOT EXISTS race is
+// real, and every concurrent NewPostgres must succeed.
+func TestPostgres_ConcurrentSchemaBootstrap(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres challenge store tests")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	admin, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	for round := range 5 {
+		name := fmt.Sprintf("bootstrap_%d_%d", time.Now().UnixNano(), round)
+		_, err := admin.Exec(ctx, `CREATE SCHEMA `+name)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, err := admin.Exec(context.Background(), `DROP SCHEMA `+name+` CASCADE`)
+			assert.NoError(t, err)
+		})
+
+		cfg, err := pgxpool.ParseConfig(dsn)
+		require.NoError(t, err)
+		cfg.ConnConfig.RuntimeParams["search_path"] = name
+		cfg.MaxConns = 16
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+
+		const replicas = 8
+		errs := make(chan error, replicas)
+		start := make(chan struct{})
+		for range replicas {
+			go func() {
+				<-start
+				_, err := NewPostgres(ctx, pool, zerolog.Nop())
+				errs <- err
+			}()
+		}
+		close(start)
+		for range replicas {
+			assert.NoError(t, <-errs, "round %d", round)
+		}
+	}
 }

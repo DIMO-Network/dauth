@@ -14,8 +14,13 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,8 +28,11 @@ import (
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/signin/nonce"
 	"github.com/DIMO-Network/dauth/internal/signin/token"
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/didkey"
 	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -61,6 +69,7 @@ type testEnv struct {
 	pub       *rsa.PublicKey
 	// holder is the DPoP key tokens are bound to.
 	holder *dpop.Key
+	keys   *keyset.KeySet
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -101,7 +110,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	h.TokenURL = ts.URL + "/token"
 	holder, err := dpop.GenerateKey()
 	require.NoError(t, err)
-	return &testEnv{ts: ts, handlers: h, directory: directory, priv: priv, pub: &rsaKey.PublicKey, holder: holder}
+	return &testEnv{ts: ts, handlers: h, directory: directory, priv: priv, pub: &rsaKey.PublicKey, holder: holder, keys: ks}
 }
 
 // sign makes the directory's r||s signature over SHA-256 of data.
@@ -147,6 +156,30 @@ func (e *testEnv) postWith(t *testing.T, path, proof string, body any) (int, map
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(data, &out), string(data))
 	return resp.StatusCode, out
+}
+
+// tryPost is postWith without testing.T, for goroutines: it returns errors
+// instead of failing the test.
+func (e *testEnv) tryPost(path, proof string, body any) (int, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequest(http.MethodPost, e.ts.URL+path, bytes.NewReader(raw))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if proof != "" {
+		req.Header.Set(dpop.HeaderName, proof)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, err = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, err
 }
 
 func (e *testEnv) challenge(t *testing.T, did string) (string, string) {
@@ -331,4 +364,581 @@ func TestIsDID(t *testing.T) {
 	assert.False(t, isDID("did:"))
 	assert.False(t, isDID("dimo:abc"))
 	assert.False(t, isDID("did:dimo:abc#signing"))
+	assert.False(t, isDID("did:dimo:a/b"))
+	assert.False(t, isDID("did:dimo:a?b"))
+	assert.False(t, isDID("did:dimo:a b"))
+	assert.True(t, isDID("did:web:example.com%3A3000:u"))
+	assert.True(t, isDID("did:web:example.com%3a3000"))
+	assert.False(t, isDID("did:dimo:a%"))
+	assert.False(t, isDID("did:dimo:a%3"))
+	assert.False(t, isDID("did:dimo:a%zz"))
+	assert.False(t, isDID("did:dimo:%"))
+	assert.True(t, isDID("did:dimo:a:b"))
+	assert.True(t, isDID("did:web:example.com%3A"))
+	assert.False(t, isDID("did:dimo:a:"), "a method-specific id may not end in ':'")
+	assert.False(t, isDID("did:dimo::"))
+	assert.False(t, isDID("did:web:example.com:"))
+	assert.True(t, isDID("did:dimo:"+strings.Repeat("a", 128-len("did:dimo:"))))
+	assert.False(t, isDID("did:dimo:"+strings.Repeat("a", 200)))
+}
+
+func TestChallengeRejectsOversizeAndPathyDIDs(t *testing.T) {
+	e := newTestEnv(t)
+	for name, did := range map[string]string{
+		"200 chars": "did:dimo:" + strings.Repeat("a", 191),
+		"slash":     "did:dimo:a/b",
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := e.post(t, "/challenge", map[string]any{"did": did, "scope": "read", "jkt": e.holder.Thumbprint()})
+			assert.Equal(t, http.StatusBadRequest, status, body)
+		})
+	}
+}
+
+func TestTokenRejectsOversizeDPoP(t *testing.T) {
+	e := newTestEnv(t)
+	_, n := e.challenge(t, testDID)
+	status, body := e.postWith(t, "/token", strings.Repeat("a", 5*1024), map[string]any{"nonce": n, "signature": "x"})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_dpop_proof", body["error"])
+}
+
+// The real DirectoryClient maps the directory's status codes: 404, 400, 410
+// and 422 refuse the sign-in; 408, 429, other 4xx and 5xx ask the caller to
+// retry.
+func TestDirectoryStatusMapping(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dirStatus int
+		want      int
+		wantErr   string
+	}{
+		{"not found", http.StatusNotFound, http.StatusUnauthorized, "invalid_grant"},
+		{"gone", http.StatusGone, http.StatusUnauthorized, "invalid_grant"},
+		{"bad request", http.StatusBadRequest, http.StatusUnauthorized, "invalid_grant"},
+		{"unprocessable", http.StatusUnprocessableEntity, http.StatusUnauthorized, "invalid_grant"},
+		{"request timeout", http.StatusRequestTimeout, http.StatusServiceUnavailable, "server_error"},
+		{"too many requests", http.StatusTooManyRequests, http.StatusServiceUnavailable, "server_error"},
+		{"forbidden", http.StatusForbidden, http.StatusServiceUnavailable, "server_error"},
+		{"internal error", http.StatusInternalServerError, http.StatusServiceUnavailable, "server_error"},
+		{"unavailable", http.StatusServiceUnavailable, http.StatusServiceUnavailable, "server_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "nope", tc.dirStatus)
+			}))
+			t.Cleanup(dir.Close)
+			e := newTestEnv(t)
+			e.handlers.Verifier = &Verifier{Directory: &DirectoryClient{Client: client.New(dir.URL)}}
+			msg, n := e.challenge(t, testDID)
+			status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+			assert.Equal(t, tc.want, status, body)
+			assert.Equal(t, tc.wantErr, body["error"])
+		})
+	}
+}
+
+func TestCORS(t *testing.T) {
+	e := newTestEnv(t)
+	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: testIssuer, JWKSURI: testIssuer + "/keys", Keys: e.keys})
+	require.NoError(t, err)
+	ts := httptest.NewServer(NewHandler(Config{Handlers: e.handlers, WellKnown: wk, CORSOrigins: []string{"https://login.test"}}))
+	t.Cleanup(ts.Close)
+
+	preflight := func(origin string) *http.Response {
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/token", nil)
+		require.NoError(t, err)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		return resp
+	}
+
+	t.Run("allowed origin", func(t *testing.T) {
+		resp := preflight("https://login.test")
+		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+		assert.Equal(t, "https://login.test", resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "GET, POST, OPTIONS", resp.Header.Get("Access-Control-Allow-Methods"))
+		assert.Equal(t, "Content-Type, DPoP", resp.Header.Get("Access-Control-Allow-Headers"))
+		assert.Equal(t, "600", resp.Header.Get("Access-Control-Max-Age"))
+		assert.Contains(t, resp.Header.Values("Vary"), "Origin")
+	})
+	t.Run("disallowed origin", func(t *testing.T) {
+		resp := preflight("https://evil.test")
+		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Methods"))
+	})
+	t.Run("no config", func(t *testing.T) {
+		resp, err := http.DefaultClient.Do(mustReq(t, http.MethodOptions, e.ts.URL+"/token", "https://login.test"))
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Empty(t, resp.Header.Values("Vary"))
+	})
+	// With origins configured, every response varies on Origin, so a shared
+	// cache never hands one origin's answer (or a no-Origin answer) to another.
+	t.Run("vary without origin", func(t *testing.T) {
+		for _, path := range []string{"/keys", "/.well-known/openid-configuration", "/nope"} {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+			assert.Contains(t, resp.Header.Values("Vary"), "Origin", path)
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"), path)
+		}
+		status, header := postTo(t, ts.URL+"/challenge", map[string]any{"did": "nope"})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Contains(t, header.Values("Vary"), "Origin", "POST /challenge")
+	})
+	t.Run("vary with disallowed origin", func(t *testing.T) {
+		resp, err := http.DefaultClient.Do(mustReq(t, http.MethodGet, ts.URL+"/keys", "https://evil.test"))
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Contains(t, resp.Header.Values("Vary"), "Origin")
+	})
+}
+
+// postTo posts body as JSON to url and returns the status and headers.
+func postTo(t *testing.T, url string, body any) (int, http.Header) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(raw))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	return resp.StatusCode, resp.Header
+}
+
+func mustReq(t *testing.T, method, url, origin string) *http.Request {
+	req, err := http.NewRequest(method, url, nil)
+	require.NoError(t, err)
+	req.Header.Set("Origin", origin)
+	return req
+}
+
+// signK1 makes the directory's r||s signature over SHA-256 of data with a
+// secp256k1 key.
+func signK1(t *testing.T, priv *secp256k1.PrivateKey, data string) string {
+	t.Helper()
+	hash := sha256.Sum256([]byte(data))
+	sig := dcrecdsa.Sign(priv, hash[:])
+	r, s := sig.R(), sig.S()
+	raw := make([]byte, 64)
+	r.PutBytesUnchecked(raw[:32])
+	s.PutBytesUnchecked(raw[32:])
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// publishK1 lists a fresh secp256k1 key as did's #fragment in the directory.
+func (e *testEnv) publishK1(t *testing.T, did, fragment string) *secp256k1.PrivateKey {
+	t.Helper()
+	k1, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	e.directory.docs[did] = append(e.directory.docs[did], VerificationMethod{
+		ID: did + "#" + fragment, PublicKeyMultibase: didkey.FromSecp256k1(k1.PubKey()).Multibase(),
+	})
+	return k1
+}
+
+// A DID whose #wallet key is secp256k1 signs in with a P-256 DPoP key: the two
+// keys are unrelated, and the token binds to the DPoP key only.
+func TestTokenK1DIDWithP256DPoP(t *testing.T) {
+	e := newTestEnv(t)
+	const did = "did:dimo:k1member"
+	k1 := e.publishK1(t, did, "wallet")
+
+	msg, n := e.challenge(t, did)
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg), "key": "wallet"})
+	require.Equal(t, http.StatusOK, status, body)
+
+	var claims token.Claims
+	_, err := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(body["token"].(string), &claims, func(*jwt.Token) (any, error) { return e.pub, nil })
+	require.NoError(t, err)
+	assert.Equal(t, did, claims.Subject)
+	require.NotNil(t, claims.Cnf)
+	assert.Equal(t, e.holder.Thumbprint(), claims.Cnf.JKT)
+}
+
+// The key is resolved at token time: one removed from the document after the
+// challenge was issued no longer signs in.
+func TestTokenRejectsKeyRemovedAfterChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	e.directory.docs[testDID] = []VerificationMethod{e.directory.docs[testDID][1]} // only #dimo_org remains
+
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_grant", body["error"])
+}
+
+func TestTokenUsesWalletFragment(t *testing.T) {
+	e := newTestEnv(t)
+	const did = "did:dimo:walletmember"
+	k1 := e.publishK1(t, did, "wallet")
+	other := e.publishK1(t, did, "signing") // a different key under the default fragment
+
+	msg, n := e.challenge(t, did)
+	// Signed by the #wallet key but verified as the default #signing: refused.
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg)})
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+
+	msg, n = e.challenge(t, did)
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg), "key": "wallet"})
+	assert.Equal(t, http.StatusOK, status, body)
+
+	msg, n = e.challenge(t, did)
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, other, msg)})
+	assert.Equal(t, http.StatusOK, status, body)
+}
+
+// countingDPoP counts the proofs it is asked to verify.
+type countingDPoP struct {
+	inner ProofVerifier
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingDPoP) Verify(proof, method, requestURL, accessToken string) (string, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.inner.Verify(proof, method, requestURL, accessToken)
+}
+
+func (c *countingDPoP) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// An unknown nonce is refused before the proof is verified, so its jti is
+// never recorded: the same proof still works for a real challenge.
+func TestTokenUnknownNonceSkipsProofVerification(t *testing.T) {
+	e := newTestEnv(t)
+	counter := &countingDPoP{inner: e.handlers.DPoP}
+	e.handlers.DPoP = counter
+
+	proof, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+	require.NoError(t, err)
+	status, body := e.postWith(t, "/token", proof, map[string]any{"nonce": "never-issued", "signature": "x"})
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_grant", body["error"])
+	assert.Zero(t, counter.count(), "an unknown nonce must not reach DPoP verification")
+
+	msg, n := e.challenge(t, testDID)
+	status, body = e.postWith(t, "/token", proof, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusOK, status, body, "the proof's jti must not have been recorded")
+	assert.Equal(t, 1, counter.count())
+}
+
+// A proof from another key is refused without spending the challenge, so
+// whoever has only the nonce cannot burn it.
+func TestTokenWrongKeyLeavesChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	other, err := dpop.GenerateKey()
+	require.NoError(t, err)
+
+	status, body := e.redeem(t, other, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_dpop_proof", body["error"])
+
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusOK, status, body, "the right key must still redeem the challenge")
+}
+
+// Concurrent redemptions of one challenge, each with its own fresh proof from
+// the right key: exactly one gets a token.
+func TestTokenConcurrentRedeem(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	sig := sign(t, e.priv, msg)
+
+	const racers = 8
+	proofs := make([]string, racers)
+	for i := range proofs {
+		p, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+		require.NoError(t, err)
+		proofs[i] = p
+	}
+	// The goroutines only send results back: require (t.FailNow) must run on
+	// the test goroutine.
+	type result struct {
+		status int
+		err    error
+	}
+	results := make(chan result, racers)
+	start := make(chan struct{})
+	for _, proof := range proofs {
+		go func() {
+			<-start
+			status, err := e.tryPost("/token", proof, map[string]any{"nonce": n, "signature": sig})
+			results <- result{status, err}
+		}()
+	}
+	close(start)
+
+	var ok, refused int
+	for range racers {
+		res := <-results
+		require.NoError(t, res.err)
+		switch res.status {
+		case http.StatusOK:
+			ok++
+		case http.StatusUnauthorized:
+			refused++
+		default:
+			t.Errorf("unexpected status %d", res.status)
+		}
+	}
+	assert.Equal(t, 1, ok, "exactly one redemption must win")
+	assert.Equal(t, racers-1, refused)
+}
+
+// The challenge stores the resolved audience, so the token carries exactly
+// the aud the challenge text named even if the default changes before /token.
+func TestChallengeStoresResolvedAudience(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	assert.Contains(t, msg, "\nFor: dimo\n")
+
+	stored, err := e.handlers.Store.Peek(context.Background(), n)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dimo"}, stored.Audience)
+
+	// A new default between challenge and token must not change the aud.
+	e.handlers.Issuer = token.NewIssuer(token.Config{Keys: e.keys, Issuer: testIssuer, Audience: []string{"changed"}, TTL: 10 * time.Minute, ApproveTTL: 2 * time.Minute})
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	require.Equal(t, http.StatusOK, status, body)
+	var claims token.Claims
+	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(body["token"].(string), &claims, func(*jwt.Token) (any, error) { return e.pub, nil })
+	require.NoError(t, err)
+	assert.Equal(t, jwt.ClaimStrings{"dimo"}, claims.Audience)
+}
+
+func TestChallengeAudienceRules(t *testing.T) {
+	e := newTestEnv(t)
+	many := make([]string, maxAudiences+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("aud-%d", i)
+	}
+	e.handlers.AllowedAudiences = append([]string{"a", "b"}, many...)
+	req := func(aud []string) (int, map[string]any) {
+		return e.post(t, "/challenge", map[string]any{"did": testDID, "audience": aud, "scope": "read", "jkt": e.holder.Thumbprint()})
+	}
+
+	status, body := req([]string{"a", "b", "a"})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_request", body["error"])
+
+	status, body = req(many)
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_request", body["error"])
+
+	status, body = req(many[:maxAudiences])
+	assert.Equal(t, http.StatusOK, status, body, "exactly the cap is allowed")
+
+	// The order sent is the order signed and stamped: never sorted or deduped.
+	status, body = req([]string{"b", "a"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Contains(t, body["challenge"], "\nFor: b, a\n")
+	stored, err := e.handlers.Store.Peek(context.Background(), body["nonce"].(string))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b", "a"}, stored.Audience)
+}
+
+// rsaProof is a DPoP proof made with an RSA key, which dpop.Key cannot make.
+func rsaProof(t *testing.T, key *rsa.PrivateKey, htu string) string {
+	t.Helper()
+	b64 := base64.RawURLEncoding.EncodeToString
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"jti": fmt.Sprint(time.Now().UnixNano()), "htm": http.MethodPost, "htu": htu, "iat": time.Now().Unix(),
+	})
+	tok.Header["typ"] = "dpop+jwt"
+	tok.Header["jwk"] = map[string]any{
+		"kty": "RSA", "n": b64(key.N.Bytes()), "e": b64(big.NewInt(int64(key.E)).Bytes()),
+	}
+	proof, err := tok.SignedString(key)
+	require.NoError(t, err)
+	return proof
+}
+
+// The thumbprint /token reads off a proof's header before verifying it is the
+// jkt dpop.Verifier returns for the same proof, for EC and RSA keys.
+func TestProofKeyThumbprintMatchesVerify(t *testing.T) {
+	const htu = "https://auth.test/signin/token"
+	v := dpop.NewVerifier()
+	var proofs []string
+	for range 5 {
+		k, err := dpop.GenerateKey()
+		require.NoError(t, err)
+		p, err := k.Proof(http.MethodPost, htu, "", time.Now())
+		require.NoError(t, err)
+		proofs = append(proofs, p)
+	}
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	proofs = append(proofs, rsaProof(t, rk, htu))
+
+	for i, p := range proofs {
+		claimed, err := proofKeyThumbprint(p)
+		require.NoError(t, err, i)
+		verified, err := v.Verify(p, http.MethodPost, htu, "")
+		require.NoError(t, err, i)
+		assert.Equal(t, verified, claimed, i)
+	}
+
+	for _, bad := range []string{"", "not-a-jwt", "a.b.c", strings.Repeat("x", 100)} {
+		_, err := proofKeyThumbprint(bad)
+		assert.Error(t, err, bad)
+	}
+}
+
+// Wrong-key proofs never reach Verify, so they record no jti and spend
+// nothing: 50 of them leave the challenge for the right key.
+func TestTokenWrongKeyProofsNeverVerified(t *testing.T) {
+	e := newTestEnv(t)
+	counter := &countingDPoP{inner: e.handlers.DPoP}
+	e.handlers.DPoP = counter
+	msg, n := e.challenge(t, testDID)
+	sig := sign(t, e.priv, msg)
+
+	for i := range 50 {
+		other, err := dpop.GenerateKey()
+		require.NoError(t, err)
+		status, body := e.redeem(t, other, map[string]any{"nonce": n, "signature": sig})
+		require.Equal(t, http.StatusBadRequest, status, "proof %d: %v", i, body)
+		require.Equal(t, "invalid_dpop_proof", body["error"], i)
+	}
+	// A header with no jwk at all is turned away the same way.
+	status, body := e.postWith(t, "/token", "e30.e30.e30", map[string]any{"nonce": n, "signature": sig})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_dpop_proof", body["error"])
+	assert.Zero(t, counter.count(), "no wrong-key proof may reach DPoP verification")
+
+	_, err := e.handlers.Store.Peek(context.Background(), n)
+	require.NoError(t, err, "the challenge must still be outstanding")
+
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sig})
+	assert.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, 1, counter.count(), "only the right key's proof is verified")
+}
+
+// The directory client applies isDID itself, so a DID from any caller (an
+// /exchange client assertion's iss included) cannot reach the directory with
+// a path in it.
+func TestDirectoryClientRefusesInvalidDIDs(t *testing.T) {
+	var hits atomic.Int32
+	dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	t.Cleanup(dir.Close)
+	dc := &DirectoryClient{Client: client.New(dir.URL)}
+
+	for _, did := range []string{"did:dimo:../../admin", "did:dimo:a/../../health", "did:dimo:a?x=1", "did:dimo:a:", "did:"} {
+		_, err := dc.VerificationMethods(context.Background(), did)
+		assert.ErrorIs(t, err, ErrDIDUnusable, did)
+	}
+	assert.Zero(t, hits.Load(), "no invalid DID may reach the directory")
+
+	_, err := dc.VerificationMethods(context.Background(), "did:dimo:valid")
+	assert.ErrorIs(t, err, ErrDIDNotFound, "a valid DID is still resolved")
+}
+
+// limitedServer serves the surface with a rate limit of perSecond, trusting
+// the loopback test client's X-Forwarded-For so each test can pose as any IP.
+func (e *testEnv) limitedServer(t *testing.T, perSecond int) *httptest.Server {
+	t.Helper()
+	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: testIssuer, JWKSURI: testIssuer + "/keys", Keys: e.keys})
+	require.NoError(t, err)
+	ts := httptest.NewServer(NewHandler(Config{
+		Handlers: e.handlers, WellKnown: wk, CORSOrigins: []string{"https://login.test"},
+		RateLimitPerSecond: perSecond, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32"), netip.MustParsePrefix("::1/128")},
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// postAs posts body to url as client ip and returns the response.
+func postAs(t *testing.T, url, ip string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", ip)
+	req.Header.Set("Origin", "https://login.test")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return resp, out
+}
+
+func TestRateLimitPerIP(t *testing.T) {
+	e := newTestEnv(t)
+	// 1 a second, burst 2: three requests well inside a second hit the limit.
+	ts := e.limitedServer(t, 1)
+	challenge := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+
+	for i := range 2 {
+		resp, body := postAs(t, ts.URL+"/challenge", "203.0.113.1", challenge)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "request %d: %v", i, body)
+	}
+	resp, body := postAs(t, ts.URL+"/challenge", "203.0.113.1", challenge)
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, body)
+	assert.Equal(t, "rate_limited", body["error"])
+	assert.NotEmpty(t, body["error_description"])
+	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+	assert.Equal(t, "https://login.test", resp.Header.Get("Access-Control-Allow-Origin"), "a browser can read the 429")
+
+	// /token shares the client's bucket.
+	resp, body = postAs(t, ts.URL+"/token", "203.0.113.1", map[string]any{"nonce": "n", "signature": "s"})
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, body)
+
+	// Another client is unaffected.
+	resp, body = postAs(t, ts.URL+"/challenge", "203.0.113.2", challenge)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, body)
+
+	// The read-only routes are never limited.
+	for range 5 {
+		r, err := http.Get(ts.URL + "/keys")
+		require.NoError(t, err)
+		_ = r.Body.Close()
+		assert.Equal(t, http.StatusOK, r.StatusCode)
+	}
+}
+
+func TestRateLimitZeroDisables(t *testing.T) {
+	e := newTestEnv(t)
+	ts := e.limitedServer(t, 0)
+	challenge := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+	for i := range 30 {
+		resp, body := postAs(t, ts.URL+"/challenge", "203.0.113.1", challenge)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "request %d: %v", i, body)
+	}
+}
+
+// IPv6 clients are limited per /64: addresses in one /64 share a bucket, and
+// another /64 has its own.
+func TestRateLimitIPv6PerSlash64(t *testing.T) {
+	e := newTestEnv(t)
+	ts := e.limitedServer(t, 1) // burst 2
+	challenge := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+
+	resp, body := postAs(t, ts.URL+"/challenge", "2001:db8:1:2::1", challenge)
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:2::2", challenge)
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:2:abcd::3", challenge)
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "a third address in the same /64 shares the bucket: %v", body)
+
+	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:3::1", challenge)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "a different /64 has its own bucket: %v", body)
 }

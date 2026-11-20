@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -42,10 +43,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// maxOutstandingChallenges bounds the in-memory nonce store. At ~400 bytes per
-// challenge this is well under 100 MiB even when full, and full only happens
-// under a challenge flood, where rejecting new challenges is the right answer.
-const maxOutstandingChallenges = 100_000
+// maxOutstandingChallenges bounds the in-memory nonce store. One challenge was
+// measured at about 1.3 KB held in the store. The chart limits the pod to
+// 256 MiB (values.yaml and values-prod.yaml), and the store may take about a
+// quarter of that: 64 MiB / 1.3 KB ≈ 51,600, so 50,000 challenges ≈ 65 MB
+// (62 MiB) when full. Full only happens under a challenge flood, where
+// rejecting new challenges is the right answer. Revisit this if the chart's
+// memory limit changes.
+const maxOutstandingChallenges = 50_000
 
 // selfTokenTTL is the lifetime of the identity token dauth mints for itself
 // to call the org host with; it is renewed before it runs out.
@@ -80,6 +85,13 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
+	exchangeKeys, err := keyset.Load(exchangeCfg.SigningKeys)
+	if err != nil {
+		return fmt.Errorf("failed to load exchange signing keys: %w", err)
+	}
+	if err := checkKeysDistinct(signinKeys, exchangeKeys); err != nil {
+		return err
+	}
 	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL, ApproveTTL: cfg.ApproveTTL})
 	signinHandler, err := buildSignin(ctx, cfg, relyingParties(cfg, exchangeCfg), signinKeys, issuer, log)
 	if err != nil {
@@ -98,7 +110,7 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	exchangeSurface, err := buildExchange(cfg, exchangeCfg, issuer, identity, log)
+	exchangeSurface, err := buildExchange(cfg, exchangeCfg, exchangeKeys, issuer, identity, log)
 	if err != nil {
 		return fmt.Errorf("building exchange surface: %w", err)
 	}
@@ -126,6 +138,8 @@ func run(log zerolog.Logger) error {
 		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).
 		Str("public_base_url", cfg.PublicBaseURL).Str("directory", cfg.DirectoryURL).
 		Str("signin_issuer", cfg.Issuer).Str("signin_active_kid", signinKeys.ActiveKID()).
+		Strs("signin_cors_origins", cfg.CORSOrigins).Int("signin_rate_limit_per_second", cfg.RateLimitPerSecond).
+		Strs("signin_trusted_proxies", prefixStrings(cfg.TrustedProxies)).
 		Str("exchange_issuer", exchangeCfg.Issuer).Str("org_host", exchangeCfg.OrgHostURL).Str("dauth_did", exchangeCfg.DauthDID).
 		Msg("dauth started")
 	return group.Wait()
@@ -141,7 +155,7 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 
 	handlers := &server.Handlers{
 		Store:            store,
-		Verifier:         &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(cfg.DirectoryURL)}},
+		Verifier:         newDIDVerifier(cfg.DirectoryURL),
 		Issuer:           issuer,
 		Domain:           cfg.Domain,
 		ChallengeTTL:     cfg.ChallengeTTL,
@@ -159,17 +173,36 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 	if err != nil {
 		return nil, err
 	}
-	return server.NewHandler(server.Config{Handlers: handlers, WellKnown: wellKnown}), nil
+	return server.NewHandler(server.Config{
+		Handlers:           handlers,
+		WellKnown:          wellKnown,
+		CORSOrigins:        cfg.CORSOrigins,
+		RateLimitPerSecond: cfg.RateLimitPerSecond,
+		TrustedProxies:     cfg.TrustedProxies,
+	}), nil
 }
 
-// buildExchange constructs the exchange surface. dauth's own identity for the
-// org host is a sign-in token for DAUTH_DID, minted here and renewed a minute
-// before it expires.
-func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer, identity *exchange.IdentityVerifier, log zerolog.Logger) (exchange.Surface, error) {
-	keys, err := keyset.Load(ecfg.SigningKeys)
-	if err != nil {
-		return exchange.Surface{}, fmt.Errorf("failed to load exchange signing keys: %w", err)
+// checkKeysDistinct fails when a sign-in signing key is also an /exchange
+// signing key. Separate keysets are the boundary between the two surfaces: a
+// token of one kind must never verify against the other surface's JWKS. Keys
+// are compared by RFC 7638 thumbprint.
+func checkKeysDistinct(signinKeys, exchangeKeys *keyset.KeySet) error {
+	used := map[string]bool{}
+	for _, kid := range exchangeKeys.KIDs() {
+		used[kid] = true
 	}
+	for _, kid := range signinKeys.KIDs() {
+		if used[kid] {
+			return fmt.Errorf("sign-in signing key %s is also an /exchange signing key; each surface needs its own keys", kid)
+		}
+	}
+	return nil
+}
+
+// buildExchange constructs the exchange surface from an already-loaded keyset.
+// dauth's own identity for the org host is a sign-in token for DAUTH_DID,
+// minted here and renewed a minute before it expires.
+func buildExchange(cfg config.Config, ecfg exchange.Config, keys *keyset.KeySet, issuer *token.Issuer, identity *exchange.IdentityVerifier, log zerolog.Logger) (exchange.Surface, error) {
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
 		Issuer:          ecfg.Issuer,
 		JWKSURI:         cfg.PublicBaseURL + "/exchange/keys",
@@ -215,16 +248,31 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 			Key:      selfKey,
 			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
 		},
-		Assertions: &exchange.AssertionVerifier{
-			Keys:          &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(cfg.DirectoryURL)}},
-			Audience:      exchangeURL,
-			IsUnavailable: func(err error) bool { return errors.Is(err, server.ErrDirectory) },
-		},
+		Assertions:  newAssertionVerifier(newDIDVerifier(cfg.DirectoryURL), exchangeURL),
 		DPoP:        dpop.NewVerifier(),
 		ExchangeURL: exchangeURL,
 		Log:         log,
 	}
 	return exchange.NewSurface(h, identity, wellKnown), nil
+}
+
+// newDIDVerifier checks signatures against the keys DID documents in the
+// directory at directoryURL list. Both surfaces use one: /signin for the
+// member's key, /exchange for an app's client assertion.
+func newDIDVerifier(directoryURL string) *server.Verifier {
+	return &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(directoryURL)}}
+}
+
+// newAssertionVerifier checks /exchange client assertions addressed to
+// audience. Only ErrDirectory (no answer, a timeout, 408, 429, a 5xx) makes
+// the exchange answer 503 and the client retry; a DID the directory does not
+// hold (404) or will never serve (400, 410, 422) is an invalid client.
+func newAssertionVerifier(keys exchange.KeyVerifier, audience string) *exchange.AssertionVerifier {
+	return &exchange.AssertionVerifier{
+		Keys:          keys,
+		Audience:      audience,
+		IsUnavailable: func(err error) bool { return errors.Is(err, server.ErrDirectory) },
+	}
 }
 
 // relyingParties is the audiences a sign-in may ask for: those configured,
@@ -233,6 +281,14 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer
 // where its holder asked for it to be.
 func relyingParties(cfg config.Config, ecfg exchange.Config) []string {
 	return append(slices.Clone(cfg.AllowedAudiences), cfg.PublicBaseURL+"/exchange", ecfg.OrgHostURL)
+}
+
+func prefixStrings(prefixes []netip.Prefix) []string {
+	out := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		out[i] = p.String()
+	}
+	return out
 }
 
 func healthCheck(w http.ResponseWriter, _ *http.Request) {

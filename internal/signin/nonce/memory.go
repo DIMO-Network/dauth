@@ -28,7 +28,7 @@ type shard struct {
 
 // Memory is an in-memory, single-use, TTL-bounded challenge store. It is the
 // default Store for a single-replica deployment. Running multiple replicas
-// requires a shared store (e.g. Redis) so a nonce issued by one replica is
+// requires the shared Postgres store, so a nonce issued by one replica is
 // consumable on another.
 type Memory struct {
 	shards     [shards]shard
@@ -75,8 +75,24 @@ func (m *Memory) Put(_ context.Context, id string, ch Challenge) error {
 	return nil
 }
 
-// Consume atomically removes and returns the challenge for id.
-func (m *Memory) Consume(_ context.Context, id string) (Challenge, error) {
+// Peek returns the challenge for id without removing it.
+func (m *Memory) Peek(_ context.Context, id string) (Challenge, error) {
+	s := m.shard(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, ok := s.entries[id]
+	if !ok || m.now().After(e.expiresAt) {
+		return Challenge{}, ErrNotFound
+	}
+	return e.ch, nil
+}
+
+// Consume atomically removes and returns the challenge for id when it is bound
+// to jkt. The key is checked and the entry deleted under the shard lock, so of
+// concurrent callers at most one gets it; a challenge for another key is left
+// in place.
+func (m *Memory) Consume(_ context.Context, id, jkt string) (Challenge, error) {
 	s := m.shard(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,10 +101,14 @@ func (m *Memory) Consume(_ context.Context, id string) (Challenge, error) {
 	if !ok {
 		return Challenge{}, ErrNotFound
 	}
-	delete(s.entries, id)
 	if m.now().After(e.expiresAt) {
+		delete(s.entries, id)
 		return Challenge{}, ErrNotFound
 	}
+	if e.ch.JKT != jkt {
+		return Challenge{}, ErrNotFound
+	}
+	delete(s.entries, id)
 	return e.ch, nil
 }
 
