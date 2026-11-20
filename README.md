@@ -122,19 +122,40 @@ endpoint may also answer `rate_limited` (see below).
 ### Rate limit
 
 `POST /signin/challenge` and `POST /signin/token` share one token bucket per
-client IP: `SIGNIN_RATE_LIMIT_PER_SECOND` requests a second (default 5), with
-a burst of twice that (10 by default), so a sign-in, which takes one of each,
-costs two. Over the limit the answer is 429 `rate_limited`, with
-`Retry-After: 1`, in the usual error body. `0` turns the limit off. The
-discovery and JWKS routes are not limited, and neither is `/exchange`.
+client: `SIGNIN_RATE_LIMIT_PER_SECOND` requests a second (default 5), with a
+burst of twice that (10 by default), so a sign-in, which takes one of each,
+costs two. A client is an IPv4 address, or an IPv6 /64 (one subscriber is
+usually given a whole /64). `0` turns the limit off. The discovery and JWKS
+routes are not limited, and neither is `/exchange`.
 
-The client IP is the TCP peer, unless the peer is in `SIGNIN_TRUSTED_PROXIES`
-(the ingress). Then `X-Forwarded-For` is read from the right, and the first
-address that is not itself a trusted proxy is the client, so a client cannot
-pick its own bucket by sending the header. Behind the ingress, without
-`SIGNIN_TRUSTED_PROXIES`, every client shares the ingress pod's address and so
-one bucket. The limiter tracks at most 50,000 addresses; when full it drops
-idle buckets first.
+For integrators: either endpoint may answer
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+
+{ "error": "rate_limited", "error_description": "too many sign-in requests from this address, retry shortly" }
+```
+
+Wait at least `Retry-After` seconds and retry; a challenge already issued
+stays valid until it expires. The buckets live in each dauth pod, so with
+several replicas the limit applies per pod, not across the service. Everyone
+behind one egress address (an office NAT, a carrier-grade NAT, a server that
+signs in on behalf of many users) shares that address's bucket.
+
+The client IP is the TCP peer, unless the peer is in `SIGNIN_TRUSTED_PROXIES`.
+Then `X-Forwarded-For` is read from the right, and the first address that is
+not itself a trusted proxy is the client, so a client cannot pick its own
+bucket by sending the header. An entry may carry a port (`203.0.113.9:4123`,
+`[2001:db8::1]:4123`); one that does not parse, or carries an IPv6 zone, stops
+the walk and the peer is used. The chart trusts loopback (the Linkerd sidecar
+dauth's traffic arrives from) and the private ranges (the ingress); without
+that, every client shares one address and so one bucket. The limiter tracks
+at most 50,000 clients; when full it drops idle buckets first.
+
+The per-IP limit does not stop a distributed flood: many addresses can still
+fill the 50,000-challenge in-memory store between them. Before prod, add a
+Cloudflare or ingress rate-limit rule on `/signin/challenge` as well.
 
 ### Validation surface
 
@@ -282,8 +303,8 @@ arithmetic.
 | `SIGNIN_DOMAIN` | | host of `PUBLIC_BASE_URL` | Shown in the challenge text |
 | `JWT_AUDIENCE` | yes | | Default `aud` of identity tokens (comma-separated) |
 | `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead; none may end in `/` |
-| `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated), each exactly as a browser sends `Origin`: lowercase `scheme://host[:port]`, no path, trailing `/` or `*`; empty sends no CORS headers |
-| `SIGNIN_RATE_LIMIT_PER_SECOND` | | `5` | Per-client-IP limit on the two `/signin` POSTs, burst twice the rate; `0` turns it off |
+| `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated), each exactly as a browser sends `Origin`: lowercase `scheme://host[:port]`, no path, trailing `/`, `*` or default port (`:443`, `:80`); empty sends no CORS headers |
+| `SIGNIN_RATE_LIMIT_PER_SECOND` | | `5` | Per-client limit (IPv4 address or IPv6 /64, per pod) on the two `/signin` POSTs, burst twice the rate; `0` turns it off |
 | `SIGNIN_TRUSTED_PROXIES` | | | CIDRs or addresses whose `X-Forwarded-For` names the client (comma-separated) |
 | `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active; must differ from the `/exchange` keys |
 | `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, the shorter of `5m` and `TOKEN_TTL` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and, when set, may not exceed `TOKEN_TTL` |
@@ -334,7 +355,17 @@ challenge in flight: the new pod starts with an empty store, so a client that
 asked the old pod for a challenge gets `invalid_grant` at `/signin/token` and
 must start again. The chart's ingress sets no rate limit; the per-IP limit on
 the `/signin` POSTs is dauth's own, and the chart sets
-`SIGNIN_TRUSTED_PROXIES` to the private ranges so it sees client addresses.
+`SIGNIN_TRUSTED_PROXIES` to loopback and the private ranges so it sees client
+addresses. After deploying to dev, check that the `remote` field on `/signin`
+log lines (a failed sign-in logs one) shows distinct public client IPs, not
+`127.0.0.1` or one private address; if it does not, every client shares one
+bucket, so fix the client-IP path (the load balancer must preserve source
+addresses) or set `SIGNIN_RATE_LIMIT_PER_SECOND` to `0` before prod.
+
+Sign-in failure logs (`sign-in key not found`, `invalid signature`) record the
+client IP (`remote`) next to the DID (`did`). Together they link a person's
+DID to a network address, so treat these logs as personal data in retention
+and access.
 
 `values-prod.yaml` sets `requireExchangeConfig: true`: rendering fails unless
 `env.ORG_HOST_URL` and `env.DAUTH_DID` are set to real values (no
