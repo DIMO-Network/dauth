@@ -105,14 +105,22 @@ the challenge named; a missing proof does not spend the challenge. Returns
 `{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
 `APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`
-(400), `invalid_grant` (401:
-bad nonce, bad signature, unknown DID or key), `server_error` (503 when the
-directory or challenge store is unavailable; get a fresh challenge and retry).
+(400, also for a proof over 4 KiB), `invalid_grant` (401: bad nonce, bad
+signature, unknown or deactivated DID, a DID the directory refuses with a 4xx,
+or unknown key), `server_error` (503 when the directory or challenge store is
+unavailable; get a fresh challenge and retry).
 
 ### Validation surface
 
 `GET /signin/keys`, `GET /signin/.well-known/jwks.json`,
 `GET /signin/.well-known/openid-configuration`.
+
+### Browsers
+
+Browsers may call `/signin` from the origins in `SIGNIN_CORS_ORIGINS`: an
+allowed origin's preflight is answered with `GET, POST, OPTIONS` and the
+`Content-Type` and `DPoP` headers, and responses carry `Vary: Origin`. Any
+other origin gets no CORS headers, and `/exchange` sends none.
 
 ## Token
 
@@ -244,8 +252,9 @@ arithmetic.
 | `SIGNIN_DOMAIN` | | host of `PUBLIC_BASE_URL` | Shown in the challenge text |
 | `JWT_AUDIENCE` | yes | | Default `aud` of identity tokens (comma-separated) |
 | `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead |
-| `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active |
-| `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, `5m` | Lifetimes; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` |
+| `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated); empty sends no CORS headers |
+| `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active; must differ from the `/exchange` keys |
+| `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, `5m` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and may not exceed `TOKEN_TTL` |
 | `DATABASE_URL` | | | Postgres challenge store; unset = in-memory, single replica |
 | `EXCHANGE_ISSUER` | yes | | `iss` of access tokens |
 | `EXCHANGE_AUDIENCE` | | `dq` | Default `aud` of access tokens |
@@ -261,8 +270,20 @@ arithmetic.
 
 Each surface loads numbered PEM RSA keys (PKCS#1 or PKCS#8, 2048 bits or
 more). The first signs; the rest stay in the JWKS so their tokens keep
-verifying through a rotation: add the new key as `_2`, deploy, swap it to `_1`,
-deploy, drop the old one after its longest token lifetime.
+verifying through a rotation. The two surfaces' keys must all differ: startup
+fails if a `/signin` key is also an `/exchange` key.
+
+To rotate a surface's key:
+
+1. Add the new key as `_2` and deploy. The JWKS now lists both; `_1` still
+   signs.
+2. Wait at least the JWKS `max-age` (5 minutes) plus any downstream caches, so
+   every validator has fetched the new key.
+3. Swap the order (new key to `_1`, old to `_2`) and deploy. New tokens are
+   signed by the new key.
+4. Wait at least the surface's longest token lifetime (`TOKEN_TTL` for
+   `/signin`), so no token from the old key is still valid, then remove the
+   old key and deploy.
 
 ```
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing.pem
@@ -272,7 +293,9 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing.pem
 
 `charts/dauth` deploys the binary with `.Values.env` rendered into a ConfigMap
 and the signing keys and `DATABASE_URL` expected from a Secret. Probes are on
-the ops port (`/ping`, `/ready`, `/metrics`).
+the ops port (`/ping`, `/ready`, `/metrics`). Rendering fails when
+`replicaCount` is above 1 and `postgres.enabled` is false: the in-memory
+challenge store is per pod, so more replicas need the Postgres store.
 
 # Development
 
