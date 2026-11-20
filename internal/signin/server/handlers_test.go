@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -346,6 +347,11 @@ func TestIsDID(t *testing.T) {
 	assert.False(t, isDID("did:dimo:a%3"))
 	assert.False(t, isDID("did:dimo:a%zz"))
 	assert.False(t, isDID("did:dimo:%"))
+	assert.True(t, isDID("did:dimo:a:b"))
+	assert.True(t, isDID("did:web:example.com%3A"))
+	assert.False(t, isDID("did:dimo:a:"), "a method-specific id may not end in ':'")
+	assert.False(t, isDID("did:dimo::"))
+	assert.False(t, isDID("did:web:example.com:"))
 	assert.True(t, isDID("did:dimo:"+strings.Repeat("a", 128-len("did:dimo:"))))
 	assert.False(t, isDID("did:dimo:"+strings.Repeat("a", 200)))
 }
@@ -713,4 +719,81 @@ func TestChallengeAudienceRules(t *testing.T) {
 	stored, err := e.handlers.Store.Peek(context.Background(), body["nonce"].(string))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"b", "a"}, stored.Audience)
+}
+
+// rsaProof is a DPoP proof made with an RSA key, which dpop.Key cannot make.
+func rsaProof(t *testing.T, key *rsa.PrivateKey, htu string) string {
+	t.Helper()
+	b64 := base64.RawURLEncoding.EncodeToString
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"jti": fmt.Sprint(time.Now().UnixNano()), "htm": http.MethodPost, "htu": htu, "iat": time.Now().Unix(),
+	})
+	tok.Header["typ"] = "dpop+jwt"
+	tok.Header["jwk"] = map[string]any{
+		"kty": "RSA", "n": b64(key.N.Bytes()), "e": b64(big.NewInt(int64(key.E)).Bytes()),
+	}
+	proof, err := tok.SignedString(key)
+	require.NoError(t, err)
+	return proof
+}
+
+// The thumbprint /token reads off a proof's header before verifying it is the
+// jkt dpop.Verifier returns for the same proof, for EC and RSA keys.
+func TestProofKeyThumbprintMatchesVerify(t *testing.T) {
+	const htu = "https://auth.test/signin/token"
+	v := dpop.NewVerifier()
+	var proofs []string
+	for range 5 {
+		k, err := dpop.GenerateKey()
+		require.NoError(t, err)
+		p, err := k.Proof(http.MethodPost, htu, "", time.Now())
+		require.NoError(t, err)
+		proofs = append(proofs, p)
+	}
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	proofs = append(proofs, rsaProof(t, rk, htu))
+
+	for i, p := range proofs {
+		claimed, err := proofKeyThumbprint(p)
+		require.NoError(t, err, i)
+		verified, err := v.Verify(p, http.MethodPost, htu, "")
+		require.NoError(t, err, i)
+		assert.Equal(t, verified, claimed, i)
+	}
+
+	for _, bad := range []string{"", "not-a-jwt", "a.b.c", strings.Repeat("x", 100)} {
+		_, err := proofKeyThumbprint(bad)
+		assert.Error(t, err, bad)
+	}
+}
+
+// Wrong-key proofs never reach Verify, so they record no jti and spend
+// nothing: 50 of them leave the challenge for the right key.
+func TestTokenWrongKeyProofsNeverVerified(t *testing.T) {
+	e := newTestEnv(t)
+	counter := &countingDPoP{inner: e.handlers.DPoP}
+	e.handlers.DPoP = counter
+	msg, n := e.challenge(t, testDID)
+	sig := sign(t, e.priv, msg)
+
+	for i := range 50 {
+		other, err := dpop.GenerateKey()
+		require.NoError(t, err)
+		status, body := e.redeem(t, other, map[string]any{"nonce": n, "signature": sig})
+		require.Equal(t, http.StatusBadRequest, status, "proof %d: %v", i, body)
+		require.Equal(t, "invalid_dpop_proof", body["error"], i)
+	}
+	// A header with no jwk at all is turned away the same way.
+	status, body := e.postWith(t, "/token", "e30.e30.e30", map[string]any{"nonce": n, "signature": sig})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_dpop_proof", body["error"])
+	assert.Zero(t, counter.count(), "no wrong-key proof may reach DPoP verification")
+
+	_, err := e.handlers.Store.Peek(context.Background(), n)
+	require.NoError(t, err, "the challenge must still be outstanding")
+
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sig})
+	assert.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, 1, counter.count(), "only the right key's proof is verified")
 }

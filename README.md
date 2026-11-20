@@ -105,9 +105,10 @@ the `For:` line. Returns `{ challenge, nonce, expires_at }`.
 `key` is the verification method fragment, default `signing`. The request
 carries `DPoP: <proof>` for `POST <PUBLIC_BASE_URL>/signin/token` from the key
 the challenge named. An unknown, used or expired nonce is refused before the
-proof is checked, and neither a missing proof nor a proof from another key
-spends the challenge: only a request holding the named key consumes it, and
-of concurrent ones exactly one does. Returns
+proof is checked, and so is a proof whose header `jwk` is not the named key:
+neither is verified, so neither records a `jti`, and neither (nor a missing
+proof) spends the challenge. Only a request holding the named key consumes
+it, and of concurrent ones exactly one does. Returns
 `{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
 `APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`

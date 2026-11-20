@@ -14,6 +14,7 @@ import (
 	"github.com/DIMO-Network/dauth/internal/signin/token"
 	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/DIMO-Network/did-directory/pkg/identity"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -38,9 +39,29 @@ const maxAudiences = 10
 
 // ProofVerifier checks a DPoP proof and returns the thumbprint of the key that
 // made it. did-directory's *dpop.Verifier is one; it records each accepted
-// proof's jti, which is why /token only calls it for a live challenge.
+// proof's jti, which is why /token only calls it for a live challenge and a
+// proof from the key that challenge names.
 type ProofVerifier interface {
 	Verify(proof, method, requestURL, accessToken string) (string, error)
+}
+
+// proofKeyThumbprint returns the RFC 7638 thumbprint of the jwk in a DPoP
+// proof's protected header, without checking the proof's signature or claims.
+// It decodes the header with the same JWT library and computes the thumbprint
+// with the same pkg/dpop function that dpop.Verifier uses, so for any proof
+// Verify accepts it equals the jkt Verify returns. It proves nothing about who
+// made the proof (the jwk is public); /token uses it only to turn away a proof
+// from another key before Verify can record that proof's jti.
+func proofKeyThumbprint(proof string) (string, error) {
+	tok, _, err := jwt.NewParser().ParseUnverified(proof, jwt.MapClaims{})
+	if err != nil {
+		return "", err
+	}
+	jwk, ok := tok.Header["jwk"].(map[string]any)
+	if !ok {
+		return "", errors.New("jwk header is required")
+	}
+	return dpop.Thumbprint(jwk)
 }
 
 // Handlers serves the sign-in endpoints.
@@ -258,13 +279,26 @@ func (h *Handlers) Token() http.Handler {
 			h.challengeLookupFailed(w, err)
 			return
 		}
+		// A proof from another key is turned away on its header's jwk, before
+		// Verify runs: it spends nothing and records no jti. Only a proof that
+		// names the challenge's own key is verified, and a verified proof goes
+		// on to consume the challenge.
+		claimed, err := proofKeyThumbprint(proof)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "DPoP proof header has no usable jwk")
+			return
+		}
+		if claimed != ch.JKT {
+			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "the DPoP proof is not from the key the challenge names")
+			return
+		}
 		jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.TokenURL, "")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
 			return
 		}
-		// A proof from another key spends nothing: whoever has only the nonce
-		// cannot burn the challenge.
+		// Verify computes the same thumbprint over the same header, so this
+		// holds whenever the check above did; it stays as the binding check.
 		if jkt != ch.JKT {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "the DPoP proof is not from the key the challenge names")
 			return
