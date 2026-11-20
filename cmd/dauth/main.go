@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -137,7 +138,8 @@ func run(log zerolog.Logger) error {
 		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).
 		Str("public_base_url", cfg.PublicBaseURL).Str("directory", cfg.DirectoryURL).
 		Str("signin_issuer", cfg.Issuer).Str("signin_active_kid", signinKeys.ActiveKID()).
-		Strs("signin_cors_origins", cfg.CORSOrigins).
+		Strs("signin_cors_origins", cfg.CORSOrigins).Int("signin_rate_limit_per_second", cfg.RateLimitPerSecond).
+		Strs("signin_trusted_proxies", prefixStrings(cfg.TrustedProxies)).
 		Str("exchange_issuer", exchangeCfg.Issuer).Str("org_host", exchangeCfg.OrgHostURL).Str("dauth_did", exchangeCfg.DauthDID).
 		Msg("dauth started")
 	return group.Wait()
@@ -171,7 +173,13 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 	if err != nil {
 		return nil, err
 	}
-	return server.NewHandler(server.Config{Handlers: handlers, WellKnown: wellKnown, CORSOrigins: cfg.CORSOrigins}), nil
+	return server.NewHandler(server.Config{
+		Handlers:           handlers,
+		WellKnown:          wellKnown,
+		CORSOrigins:        cfg.CORSOrigins,
+		RateLimitPerSecond: cfg.RateLimitPerSecond,
+		TrustedProxies:     cfg.TrustedProxies,
+	}), nil
 }
 
 // checkKeysDistinct fails when a sign-in signing key is also an /exchange
@@ -273,6 +281,14 @@ func newAssertionVerifier(keys exchange.KeyVerifier, audience string) *exchange.
 // where its holder asked for it to be.
 func relyingParties(cfg config.Config, ecfg exchange.Config) []string {
 	return append(slices.Clone(cfg.AllowedAudiences), cfg.PublicBaseURL+"/exchange", ecfg.OrgHostURL)
+}
+
+func prefixStrings(prefixes []netip.Prefix) []string {
+	out := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		out[i] = p.String()
+	}
+	return out
 }
 
 func healthCheck(w http.ResponseWriter, _ *http.Request) {

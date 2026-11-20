@@ -116,7 +116,25 @@ it, and of concurrent ones exactly one does. Returns
 bad nonce, bad signature, unknown key, or a DID the directory does not hold
 (404) or will not serve (400, 410, 422)), `server_error` (503 when the
 challenge store is unavailable, or the directory does not answer: a timeout,
-408, 429, any other 4xx or a 5xx; get a fresh challenge and retry).
+408, 429, any other 4xx or a 5xx; get a fresh challenge and retry). Either
+endpoint may also answer `rate_limited` (see below).
+
+### Rate limit
+
+`POST /signin/challenge` and `POST /signin/token` share one token bucket per
+client IP: `SIGNIN_RATE_LIMIT_PER_SECOND` requests a second (default 5), with
+a burst of twice that (10 by default), so a sign-in, which takes one of each,
+costs two. Over the limit the answer is 429 `rate_limited`, with
+`Retry-After: 1`, in the usual error body. `0` turns the limit off. The
+discovery and JWKS routes are not limited, and neither is `/exchange`.
+
+The client IP is the TCP peer, unless the peer is in `SIGNIN_TRUSTED_PROXIES`
+(the ingress). Then `X-Forwarded-For` is read from the right, and the first
+address that is not itself a trusted proxy is the client, so a client cannot
+pick its own bucket by sending the header. Behind the ingress, without
+`SIGNIN_TRUSTED_PROXIES`, every client shares the ingress pod's address and so
+one bucket. The limiter tracks at most 50,000 addresses; when full it drops
+idle buckets first.
 
 ### Validation surface
 
@@ -265,6 +283,8 @@ arithmetic.
 | `JWT_AUDIENCE` | yes | | Default `aud` of identity tokens (comma-separated) |
 | `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead; none may end in `/` |
 | `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated), each exactly as a browser sends `Origin`: lowercase `scheme://host[:port]`, no path, trailing `/` or `*`; empty sends no CORS headers |
+| `SIGNIN_RATE_LIMIT_PER_SECOND` | | `5` | Per-client-IP limit on the two `/signin` POSTs, burst twice the rate; `0` turns it off |
+| `SIGNIN_TRUSTED_PROXIES` | | | CIDRs or addresses whose `X-Forwarded-For` names the client (comma-separated) |
 | `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active; must differ from the `/exchange` keys |
 | `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, the shorter of `5m` and `TOKEN_TTL` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and, when set, may not exceed `TOKEN_TTL` |
 | `DATABASE_URL` | | | Postgres challenge store; unset = in-memory, single replica |
@@ -312,8 +332,9 @@ in-memory store holds at most 50,000 challenges, sized to the chart's 256 MiB
 memory limit. With Postgres disabled, a rolling deploy also drops every
 challenge in flight: the new pod starts with an empty store, so a client that
 asked the old pod for a challenge gets `invalid_grant` at `/signin/token` and
-must start again. dauth has no rate limit of its own, and the chart's ingress
-sets none.
+must start again. The chart's ingress sets no rate limit; the per-IP limit on
+the `/signin` POSTs is dauth's own, and the chart sets
+`SIGNIN_TRUSTED_PROXIES` to the private ranges so it sees client addresses.
 
 `values-prod.yaml` sets `requireExchangeConfig: true`: rendering fails unless
 `env.ORG_HOST_URL` and `env.DAUTH_DID` are set to real values (no

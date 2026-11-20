@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -846,4 +847,80 @@ func TestDirectoryClientRefusesInvalidDIDs(t *testing.T) {
 
 	_, err := dc.VerificationMethods(context.Background(), "did:dimo:valid")
 	assert.ErrorIs(t, err, ErrDIDNotFound, "a valid DID is still resolved")
+}
+
+// limitedServer serves the surface with a rate limit of perSecond, trusting
+// the loopback test client's X-Forwarded-For so each test can pose as any IP.
+func (e *testEnv) limitedServer(t *testing.T, perSecond int) *httptest.Server {
+	t.Helper()
+	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: testIssuer, JWKSURI: testIssuer + "/keys", Keys: e.keys})
+	require.NoError(t, err)
+	ts := httptest.NewServer(NewHandler(Config{
+		Handlers: e.handlers, WellKnown: wk, CORSOrigins: []string{"https://login.test"},
+		RateLimitPerSecond: perSecond, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32"), netip.MustParsePrefix("::1/128")},
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// postAs posts body to url as client ip and returns the response.
+func postAs(t *testing.T, url, ip string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", ip)
+	req.Header.Set("Origin", "https://login.test")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return resp, out
+}
+
+func TestRateLimitPerIP(t *testing.T) {
+	e := newTestEnv(t)
+	// 1 a second, burst 2: three requests well inside a second hit the limit.
+	ts := e.limitedServer(t, 1)
+	challenge := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+
+	for i := range 2 {
+		resp, body := postAs(t, ts.URL+"/challenge", "203.0.113.1", challenge)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "request %d: %v", i, body)
+	}
+	resp, body := postAs(t, ts.URL+"/challenge", "203.0.113.1", challenge)
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, body)
+	assert.Equal(t, "rate_limited", body["error"])
+	assert.NotEmpty(t, body["error_description"])
+	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+	assert.Equal(t, "https://login.test", resp.Header.Get("Access-Control-Allow-Origin"), "a browser can read the 429")
+
+	// /token shares the client's bucket.
+	resp, body = postAs(t, ts.URL+"/token", "203.0.113.1", map[string]any{"nonce": "n", "signature": "s"})
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, body)
+
+	// Another client is unaffected.
+	resp, body = postAs(t, ts.URL+"/challenge", "203.0.113.2", challenge)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, body)
+
+	// The read-only routes are never limited.
+	for range 5 {
+		r, err := http.Get(ts.URL + "/keys")
+		require.NoError(t, err)
+		_ = r.Body.Close()
+		assert.Equal(t, http.StatusOK, r.StatusCode)
+	}
+}
+
+func TestRateLimitZeroDisables(t *testing.T) {
+	e := newTestEnv(t)
+	ts := e.limitedServer(t, 0)
+	challenge := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+	for i := range 30 {
+		resp, body := postAs(t, ts.URL+"/challenge", "203.0.113.1", challenge)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "request %d: %v", i, body)
+	}
 }

@@ -187,3 +187,40 @@ func TestLoadRejectsTrailingSlashAudience(t *testing.T) {
 	_, err = Load()
 	assert.NoError(t, err)
 }
+
+func TestLoadRateLimit(t *testing.T) {
+	setMinimalEnv(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 5, cfg.RateLimitPerSecond, "default")
+
+	t.Setenv("SIGNIN_RATE_LIMIT_PER_SECOND", "0")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Zero(t, cfg.RateLimitPerSecond, "0 disables")
+
+	for _, bad := range []string{"-1", "five", "2.5"} {
+		t.Setenv("SIGNIN_RATE_LIMIT_PER_SECOND", bad)
+		_, err = Load()
+		assert.Error(t, err, bad)
+	}
+}
+
+func TestLoadTrustedProxies(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("SIGNIN_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.7, fd00::/8, 172.16.5.9/12")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.0/8", "192.168.1.7/32", "fd00::/8", "172.16.0.0/12"}, func() []string {
+		var out []string
+		for _, p := range cfg.TrustedProxies {
+			out = append(out, p.String())
+		}
+		return out
+	}())
+
+	t.Setenv("SIGNIN_TRUSTED_PROXIES", "10.0.0.0/8,not-an-ip")
+	_, err = Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not-an-ip")
+}

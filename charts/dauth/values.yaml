@@ -34,6 +34,11 @@ env:
   SIGNIN_ALLOWED_AUDIENCES: https://accounts.dev.dimo.org
   # Browser origins allowed to call /signin (login and console).
   SIGNIN_CORS_ORIGINS: https://login.dev.dimo.org,https://console-staging.dimo.org
+  # Peers whose X-Forwarded-For names the client, for the /signin rate limit
+  # (SIGNIN_RATE_LIMIT_PER_SECOND, default 5 a second per IP): the private
+  # ranges the ingress controller's pods sit in. Without it every client
+  # would share the ingress pod's address, and so one limit.
+  SIGNIN_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
   CHALLENGE_TTL: 5m
   EXCHANGE_ISSUER: https://dauth.dev.dimo.zone/exchange
   EXCHANGE_AUDIENCE: dq

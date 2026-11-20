@@ -6,6 +6,7 @@ package server
 
 import (
 	"net/http"
+	"net/netip"
 	"slices"
 
 	"github.com/DIMO-Network/dauth/internal/httpmw"
@@ -13,9 +14,15 @@ import (
 )
 
 // maxBodyBytes caps request bodies on the write endpoints: a cheap in-process
-// belt against malformed giant bodies. TLS terminates at the ingress. dauth
-// applies no rate limit of its own, and the chart's ingress sets none either.
+// belt against malformed giant bodies. TLS terminates at the ingress, which
+// sets no rate limit; the per-client limit on the write endpoints is dauth's
+// own (see rateLimit).
 const maxBodyBytes = 16 << 10 // 16 KiB
+
+// maxLimitedClients bounds how many client IPs the rate limiter tracks. A
+// bucket is about 200 bytes with its map entry, so a full limiter is about
+// 10 MB.
+const maxLimitedClients = 50_000
 
 // Config configures the sign-in surface.
 type Config struct {
@@ -24,6 +31,13 @@ type Config struct {
 	// CORSOrigins are the browser origins allowed to call /signin
 	// (SIGNIN_CORS_ORIGINS). Empty means no CORS headers are sent.
 	CORSOrigins []string
+	// RateLimitPerSecond limits POST /challenge and POST /token, together, per
+	// client IP, with a burst of twice the rate (SIGNIN_RATE_LIMIT_PER_SECOND).
+	// Zero turns the limit off.
+	RateLimitPerSecond int
+	// TrustedProxies are the peers whose X-Forwarded-For names the client
+	// (SIGNIN_TRUSTED_PROXIES); see httpmw.ClientIP.
+	TrustedProxies []netip.Prefix
 }
 
 // NewHandler builds the sign-in surface as an http.Handler with routes
@@ -31,14 +45,36 @@ type Config struct {
 // the read-only discovery and JWKS routes are exempt.
 func NewHandler(cfg Config) http.Handler {
 	guard := httpmw.MaxBytes(maxBodyBytes)
+	limit := rateLimit(cfg.RateLimitPerSecond)
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /challenge", guard(cfg.Handlers.Challenge()))
-	mux.Handle("POST /token", guard(cfg.Handlers.Token()))
+	mux.Handle("POST /challenge", limit(guard(cfg.Handlers.Challenge())))
+	mux.Handle("POST /token", limit(guard(cfg.Handlers.Token())))
 	mux.Handle("GET /.well-known/openid-configuration", cfg.WellKnown.Discovery())
 	mux.Handle("GET /keys", cfg.WellKnown.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", cfg.WellKnown.JWKS())
-	return cors(cfg.CORSOrigins, mux)
+	return httpmw.ClientIP(cfg.TrustedProxies)(cors(cfg.CORSOrigins, mux))
+}
+
+// rateLimit limits the routes it wraps, together, per client IP (as
+// httpmw.RemoteIP resolves it): perSecond requests a second with a burst of
+// twice that. Over the limit is 429 rate_limited with Retry-After: 1, in the
+// surface's usual error body. perSecond <= 0 turns it off.
+func rateLimit(perSecond int) func(http.Handler) http.Handler {
+	if perSecond <= 0 {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	limiter := httpmw.NewKeyedLimiter(float64(perSecond), 2*perSecond, maxLimitedClients)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !limiter.Allow(httpmw.RemoteIP(r)) {
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusTooManyRequests, "rate_limited", "too many sign-in requests from this address, retry shortly")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // cors lets the listed origins call the sign-in surface from a browser. It

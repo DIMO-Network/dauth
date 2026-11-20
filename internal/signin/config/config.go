@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -52,6 +53,16 @@ type Config struct {
 	// Each must be exactly what a browser sends in Origin: lowercase
 	// scheme://host[:port], no path, no trailing slash, no wildcard.
 	CORSOrigins []string
+
+	// RateLimitPerSecond is the per-client-IP limit on POST /signin/challenge
+	// and POST /signin/token together (SIGNIN_RATE_LIMIT_PER_SECOND, default 5;
+	// 0 disables it). The burst is twice the rate.
+	RateLimitPerSecond int
+
+	// TrustedProxies are the peers whose X-Forwarded-For dauth believes when
+	// it works out a client's IP (SIGNIN_TRUSTED_PROXIES, comma-separated
+	// CIDRs or addresses). Empty means the TCP peer is the client.
+	TrustedProxies []netip.Prefix
 
 	// Lifetimes.
 	ChallengeTTL time.Duration // CHALLENGE_TTL
@@ -166,6 +177,20 @@ func Load() (Config, error) {
 		return s, fmt.Errorf("APPROVE_TOKEN_TTL (%s) must not exceed TOKEN_TTL (%s)", s.ApproveTTL, s.TokenTTL)
 	}
 
+	if s.RateLimitPerSecond, err = envx.Int("SIGNIN_RATE_LIMIT_PER_SECOND", 5); err != nil {
+		return s, err
+	}
+	if s.RateLimitPerSecond < 0 {
+		return s, fmt.Errorf("SIGNIN_RATE_LIMIT_PER_SECOND must be 0 (off) or more, got %d", s.RateLimitPerSecond)
+	}
+	for _, p := range envx.List(os.Getenv("SIGNIN_TRUSTED_PROXIES")) {
+		prefix, err := parsePrefix(p)
+		if err != nil {
+			return s, fmt.Errorf("SIGNIN_TRUSTED_PROXIES entries must be CIDRs or IP addresses, got %q", p)
+		}
+		s.TrustedProxies = append(s.TrustedProxies, prefix)
+	}
+
 	// Signing keys: SIGNIN_SIGNING_KEY_1, SIGNIN_SIGNING_KEY_2, ... in order. The
 	// first is the active signer. At least one is required to mint tokens.
 	s.SigningKeys = envx.Numbered("SIGNIN_SIGNING_KEY_")
@@ -199,4 +224,18 @@ func isOrigin(o string) bool {
 		return false
 	}
 	return o == u.Scheme+"://"+u.Host
+}
+
+// parsePrefix reads a CIDR, or a bare address as a single-address prefix.
+func parsePrefix(s string) (netip.Prefix, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		return p.Masked(), err
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
 }
