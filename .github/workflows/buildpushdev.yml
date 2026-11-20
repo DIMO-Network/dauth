@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+# One run at a time on main, in push order. A queued run waits rather than
+# cancelling the one in progress, so the image tag written back is always the
+# newest push's (GitHub keeps only the latest pending run in a group).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Holds the Docker Hub login, and nothing that writes to the repository.
   build:

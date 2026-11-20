@@ -15,9 +15,17 @@ env:
   CHALLENGE_TTL: 5m
   # --- Exchange surface (/exchange) ---
   EXCHANGE_ISSUER: https://dauth.dimo.zone/exchange
-  # Not set yet, and dauth does not start without them: ORG_HOST_URL and
-  # DAUTH_DID (EXCHANGE_AUDIENCE defaults to dq).
+  # Prod's org host and dauth DID are not known yet. null deletes the dev values
+  # this file would otherwise inherit from values.yaml (org-host-dev and the
+  # REPLACE_WITH placeholder), and requireExchangeConfig below makes rendering
+  # fail until both are set here. EXCHANGE_AUDIENCE inherits dev's dq, which
+  # is also the code default.
+  ORG_HOST_URL: null
+  DAUTH_DID: null
   ENABLE_PPROF: "false"
+
+# Fail rendering unless env.ORG_HOST_URL and env.DAUTH_DID are real values.
+requireExchangeConfig: true
 
 # Postgres-backed challenge store. When enabled, raise replicaCount above 1 and
 # provision the dauth/database_url secret (a postgres:// connection URL) in AWS

@@ -42,6 +42,9 @@ env:
   ENABLE_PPROF: 'false'
 postgres:
   enabled: false
+# When true, rendering fails unless env.ORG_HOST_URL and env.DAUTH_DID are set
+# to real values (no REPLACE_WITH placeholder). values-prod.yaml turns it on.
+requireExchangeConfig: false
 ports:
   - name: http
     containerPort: 8080

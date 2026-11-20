@@ -312,6 +312,11 @@ in-memory store holds at most 50,000 challenges, sized to the chart's 256 MiB
 memory limit. dauth has no rate limit of its own, and the chart's ingress sets
 none.
 
+`values-prod.yaml` sets `requireExchangeConfig: true`: rendering fails unless
+`env.ORG_HOST_URL` and `env.DAUTH_DID` are set to real values (no
+`REPLACE_WITH` placeholder). It also sets both to `null`, so prod never
+inherits dev's values from `values.yaml` through Helm's merge.
+
 # Development
 
 ```

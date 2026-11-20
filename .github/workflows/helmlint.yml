@@ -12,3 +12,17 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - name: Lint dauth chart
         run: helm lint charts/dauth
+      # helm lint treats a template `fail` as informational, so the prod checks
+      # also render with helm template. The --set values are CI placeholders
+      # that satisfy requireExchangeConfig; they are not prod's real values.
+      - name: Lint and render with prod values
+        run: |
+          prod_set="--set env.ORG_HOST_URL=https://org-host.invalid --set env.DAUTH_DID=did:dimo:ci-placeholder"
+          helm lint charts/dauth -f charts/dauth/values-prod.yaml $prod_set
+          helm template charts/dauth -f charts/dauth/values-prod.yaml $prod_set > /dev/null
+      - name: Prod values without exchange config must not render
+        run: |
+          if helm template charts/dauth -f charts/dauth/values-prod.yaml > /dev/null 2>&1; then
+            echo "values-prod.yaml rendered without ORG_HOST_URL and DAUTH_DID; requireExchangeConfig is not enforced" >&2
+            exit 1
+          fi
