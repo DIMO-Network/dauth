@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,8 +24,11 @@ import (
 	"github.com/DIMO-Network/dauth/internal/oidc"
 	"github.com/DIMO-Network/dauth/internal/signin/nonce"
 	"github.com/DIMO-Network/dauth/internal/signin/token"
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/didkey"
 	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -61,6 +65,7 @@ type testEnv struct {
 	pub       *rsa.PublicKey
 	// holder is the DPoP key tokens are bound to.
 	holder *dpop.Key
+	keys   *keyset.KeySet
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -101,7 +106,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	h.TokenURL = ts.URL + "/token"
 	holder, err := dpop.GenerateKey()
 	require.NoError(t, err)
-	return &testEnv{ts: ts, handlers: h, directory: directory, priv: priv, pub: &rsaKey.PublicKey, holder: holder}
+	return &testEnv{ts: ts, handlers: h, directory: directory, priv: priv, pub: &rsaKey.PublicKey, holder: holder, keys: ks}
 }
 
 // sign makes the directory's r||s signature over SHA-256 of data.
@@ -331,4 +336,182 @@ func TestIsDID(t *testing.T) {
 	assert.False(t, isDID("did:"))
 	assert.False(t, isDID("dimo:abc"))
 	assert.False(t, isDID("did:dimo:abc#signing"))
+	assert.False(t, isDID("did:dimo:a/b"))
+	assert.False(t, isDID("did:dimo:a?b"))
+	assert.False(t, isDID("did:dimo:a b"))
+	assert.True(t, isDID("did:web:example.com%3A3000:u"))
+	assert.True(t, isDID("did:dimo:"+strings.Repeat("a", 128-len("did:dimo:"))))
+	assert.False(t, isDID("did:dimo:"+strings.Repeat("a", 200)))
+}
+
+func TestChallengeRejectsOversizeAndPathyDIDs(t *testing.T) {
+	e := newTestEnv(t)
+	for name, did := range map[string]string{
+		"200 chars": "did:dimo:" + strings.Repeat("a", 191),
+		"slash":     "did:dimo:a/b",
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := e.post(t, "/challenge", map[string]any{"did": did, "scope": "read", "jkt": e.holder.Thumbprint()})
+			assert.Equal(t, http.StatusBadRequest, status, body)
+		})
+	}
+}
+
+func TestTokenRejectsOversizeDPoP(t *testing.T) {
+	e := newTestEnv(t)
+	_, n := e.challenge(t, testDID)
+	status, body := e.postWith(t, "/token", strings.Repeat("a", 5*1024), map[string]any{"nonce": n, "signature": "x"})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_dpop_proof", body["error"])
+}
+
+// The real DirectoryClient maps the directory's status codes: 410 and 4xx
+// refuse the sign-in, 5xx asks the caller to retry.
+func TestDirectoryStatusMapping(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dirStatus int
+		want      int
+		wantErr   string
+	}{
+		{"gone", http.StatusGone, http.StatusUnauthorized, "invalid_grant"},
+		{"bad request", http.StatusBadRequest, http.StatusUnauthorized, "invalid_grant"},
+		{"unavailable", http.StatusServiceUnavailable, http.StatusServiceUnavailable, "server_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "nope", tc.dirStatus)
+			}))
+			t.Cleanup(dir.Close)
+			e := newTestEnv(t)
+			e.handlers.Verifier = &Verifier{Directory: &DirectoryClient{Client: client.New(dir.URL)}}
+			msg, n := e.challenge(t, testDID)
+			status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+			assert.Equal(t, tc.want, status, body)
+			assert.Equal(t, tc.wantErr, body["error"])
+		})
+	}
+}
+
+func TestCORS(t *testing.T) {
+	e := newTestEnv(t)
+	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: testIssuer, JWKSURI: testIssuer + "/keys", Keys: e.keys})
+	require.NoError(t, err)
+	ts := httptest.NewServer(NewHandler(Config{Handlers: e.handlers, WellKnown: wk, CORSOrigins: []string{"https://login.test"}}))
+	t.Cleanup(ts.Close)
+
+	preflight := func(origin string) *http.Response {
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/token", nil)
+		require.NoError(t, err)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		return resp
+	}
+
+	t.Run("allowed origin", func(t *testing.T) {
+		resp := preflight("https://login.test")
+		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+		assert.Equal(t, "https://login.test", resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "GET, POST, OPTIONS", resp.Header.Get("Access-Control-Allow-Methods"))
+		assert.Equal(t, "Content-Type, DPoP", resp.Header.Get("Access-Control-Allow-Headers"))
+		assert.Equal(t, "600", resp.Header.Get("Access-Control-Max-Age"))
+		assert.Contains(t, resp.Header.Values("Vary"), "Origin")
+	})
+	t.Run("disallowed origin", func(t *testing.T) {
+		resp := preflight("https://evil.test")
+		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Methods"))
+	})
+	t.Run("no config", func(t *testing.T) {
+		resp, err := http.DefaultClient.Do(mustReq(t, http.MethodOptions, e.ts.URL+"/token", "https://login.test"))
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+	})
+}
+
+func mustReq(t *testing.T, method, url, origin string) *http.Request {
+	req, err := http.NewRequest(method, url, nil)
+	require.NoError(t, err)
+	req.Header.Set("Origin", origin)
+	return req
+}
+
+// signK1 makes the directory's r||s signature over SHA-256 of data with a
+// secp256k1 key.
+func signK1(t *testing.T, priv *secp256k1.PrivateKey, data string) string {
+	t.Helper()
+	hash := sha256.Sum256([]byte(data))
+	sig := dcrecdsa.Sign(priv, hash[:])
+	r, s := sig.R(), sig.S()
+	raw := make([]byte, 64)
+	r.PutBytesUnchecked(raw[:32])
+	s.PutBytesUnchecked(raw[32:])
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// publishK1 lists a fresh secp256k1 key as did's #fragment in the directory.
+func (e *testEnv) publishK1(t *testing.T, did, fragment string) *secp256k1.PrivateKey {
+	t.Helper()
+	k1, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	e.directory.docs[did] = append(e.directory.docs[did], VerificationMethod{
+		ID: did + "#" + fragment, PublicKeyMultibase: didkey.FromSecp256k1(k1.PubKey()).Multibase(),
+	})
+	return k1
+}
+
+// A DID whose #wallet key is secp256k1 signs in with a P-256 DPoP key: the two
+// keys are unrelated, and the token binds to the DPoP key only.
+func TestTokenK1DIDWithP256DPoP(t *testing.T) {
+	e := newTestEnv(t)
+	const did = "did:dimo:k1member"
+	k1 := e.publishK1(t, did, "wallet")
+
+	msg, n := e.challenge(t, did)
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg), "key": "wallet"})
+	require.Equal(t, http.StatusOK, status, body)
+
+	var claims token.Claims
+	_, err := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(body["token"].(string), &claims, func(*jwt.Token) (any, error) { return e.pub, nil })
+	require.NoError(t, err)
+	assert.Equal(t, did, claims.Subject)
+	require.NotNil(t, claims.Cnf)
+	assert.Equal(t, e.holder.Thumbprint(), claims.Cnf.JKT)
+}
+
+// The key is resolved at token time: one removed from the document after the
+// challenge was issued no longer signs in.
+func TestTokenRejectsKeyRemovedAfterChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	e.directory.docs[testDID] = []VerificationMethod{e.directory.docs[testDID][1]} // only #dimo_org remains
+
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_grant", body["error"])
+}
+
+func TestTokenUsesWalletFragment(t *testing.T) {
+	e := newTestEnv(t)
+	const did = "did:dimo:walletmember"
+	k1 := e.publishK1(t, did, "wallet")
+	other := e.publishK1(t, did, "signing") // a different key under the default fragment
+
+	msg, n := e.challenge(t, did)
+	// Signed by the #wallet key but verified as the default #signing: refused.
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg)})
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+
+	msg, n = e.challenge(t, did)
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg), "key": "wallet"})
+	assert.Equal(t, http.StatusOK, status, body)
+
+	msg, n = e.challenge(t, did)
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, other, msg)})
+	assert.Equal(t, http.StatusOK, status, body)
 }

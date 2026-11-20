@@ -19,12 +19,12 @@ var schema string
 // in-memory store it is shared across replicas, so a challenge issued by one
 // dauth pod is consumable on any other — which is what lets dauth run more than
 // one replica. Single-use consumption is a DELETE ... RETURNING, atomic even
-// under concurrent /auth/token calls racing on the same nonce: exactly one
+// under concurrent /signin/token calls racing on the same nonce: exactly one
 // caller gets the row, every other gets ErrNotFound.
 //
 // There is no hard capacity cap here (the in-memory store's ErrFull guards a
 // process's heap). A flood of unredeemed challenges is bounded instead by the
-// HTTP rate limiter in front of /auth/challenge and by the janitor sweeping
+// HTTP rate limiter in front of /signin/challenge and by the janitor sweeping
 // expired rows; each row is tiny and short-lived.
 type Postgres struct {
 	db  *pgxpool.Pool

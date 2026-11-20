@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"regexp"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/didkey"
@@ -32,10 +33,19 @@ type VerificationMethod struct {
 // Directory answers which keys a DID currently publishes.
 type Directory interface {
 	// VerificationMethods resolves did and returns its verification methods.
-	// It returns ErrDIDNotFound for a DID the directory does not hold and
-	// wraps ErrDirectory for any other failure.
+	// It returns ErrDIDNotFound for a DID the directory does not hold, wraps
+	// ErrDIDUnusable for one it refuses to serve (gone, or a 4xx), and wraps
+	// ErrDirectory for any other failure.
 	VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error)
 }
+
+// ErrDIDUnusable means the directory holds the DID but will not serve a
+// document for it (it was deactivated, or the directory refused the request as
+// malformed). Retrying cannot help, so the sign-in is refused.
+var ErrDIDUnusable = errors.New("DID not usable")
+
+// resolveTimeout bounds one directory resolve.
+const resolveTimeout = 5 * time.Second
 
 // DirectoryClient is a Directory over the did-directory HTTP client.
 type DirectoryClient struct {
@@ -44,10 +54,18 @@ type DirectoryClient struct {
 
 // VerificationMethods implements Directory.
 func (d *DirectoryClient) VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error) {
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
 	doc, err := d.Client.Resolve(ctx, did)
 	if err != nil {
-		if errors.Is(err, client.ErrNotFound) {
+		var se *client.StatusError
+		switch {
+		case errors.Is(err, client.ErrNotFound):
 			return nil, ErrDIDNotFound
+		case errors.Is(err, client.ErrGone):
+			return nil, fmt.Errorf("%w: %v", ErrDIDUnusable, err)
+		case errors.As(err, &se) && se.Status >= 400 && se.Status < 500:
+			return nil, fmt.Errorf("%w: directory answered %d", ErrDIDUnusable, se.Status)
 		}
 		return nil, fmt.Errorf("%w: %v", ErrDirectory, err)
 	}
@@ -74,7 +92,8 @@ type Verifier struct {
 // verification method <did>#<fragment>. It returns nil when the signature
 // verifies, ErrNoSuchKey when the document lists no such method, a
 // signature error otherwise, and wraps ErrDirectory when the document could
-// not be fetched.
+// not be fetched. ErrDIDNotFound and ErrDIDUnusable come back from the
+// directory as they are.
 func (v *Verifier) Verify(ctx context.Context, did, fragment string, data []byte, sig string) error {
 	if fragment == orgKeyFragment {
 		return fmt.Errorf("%w: #%s is a commit key, not a sign-in key", ErrNoSuchKey, fragment)
@@ -97,13 +116,16 @@ func (v *Verifier) Verify(ctx context.Context, did, fragment string, data []byte
 	return fmt.Errorf("%w: %s", ErrNoSuchKey, want)
 }
 
-// isDID is the loose syntactic check on a DID: the scheme and a non-empty
-// method-specific id. The directory decides whether it exists.
+// maxDIDLen caps a DID before it reaches the store or the directory.
+const maxDIDLen = 128
+
+// didPattern is the DID-core charset: the scheme, a lowercase method, and a
+// method-specific id of letters, digits and . _ : % -. It admits no / ? # or
+// whitespace, so a DID cannot rewrite the directory request path.
+var didPattern = regexp.MustCompile(`^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$`)
+
+// isDID is the syntactic check on a DID, applied before anything is stored or
+// resolved. The directory decides whether it exists.
 func isDID(s string) bool {
-	rest, ok := strings.CutPrefix(s, "did:")
-	if !ok {
-		return false
-	}
-	method, id, ok := strings.Cut(rest, ":")
-	return ok && method != "" && id != "" && !strings.ContainsAny(s, " \t\r\n#")
+	return len(s) <= maxDIDLen && didPattern.MatchString(s)
 }

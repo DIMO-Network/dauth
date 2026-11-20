@@ -26,6 +26,10 @@ const defaultKeyFragment = "signing"
 // document fragment can be.
 var fragmentPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
+// maxDPoPBytes caps the DPoP header before it is parsed (did-directory's
+// pkg/dpop caps it too).
+const maxDPoPBytes = 4096
+
 // jktPattern is a SHA-256 thumbprint in base64url without padding.
 var jktPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
@@ -222,6 +226,10 @@ func (h *Handlers) Token() http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "a DPoP proof from the key the challenge names is required")
 			return
 		}
+		if len(proof) > maxDPoPBytes {
+			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "DPoP proof is too large")
+			return
+		}
 		jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.TokenURL, "")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
@@ -250,7 +258,7 @@ func (h *Handlers) Token() http.Handler {
 			h.Log.Warn().Err(err).Str("did", ch.DID).Msg("directory unavailable during sign-in")
 			writeError(w, http.StatusServiceUnavailable, "server_error", "could not resolve the DID, retry shortly")
 			return
-		case errors.Is(err, ErrDIDNotFound), errors.Is(err, ErrNoSuchKey):
+		case errors.Is(err, ErrDIDNotFound), errors.Is(err, ErrDIDUnusable), errors.Is(err, ErrNoSuchKey):
 			h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("sign-in key not found")
 			writeError(w, http.StatusUnauthorized, "invalid_grant", err.Error())
 			return

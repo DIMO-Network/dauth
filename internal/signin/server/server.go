@@ -6,6 +6,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/DIMO-Network/dauth/internal/httpmw"
 	"github.com/DIMO-Network/dauth/internal/oidc"
@@ -20,6 +21,9 @@ const maxBodyBytes = 16 << 10 // 16 KiB
 type Config struct {
 	Handlers  *Handlers
 	WellKnown *oidc.WellKnown
+	// CORSOrigins are the browser origins allowed to call /signin
+	// (SIGNIN_CORS_ORIGINS). Empty means no CORS headers are sent.
+	CORSOrigins []string
 }
 
 // NewHandler builds the sign-in surface as an http.Handler with routes
@@ -34,5 +38,37 @@ func NewHandler(cfg Config) http.Handler {
 	mux.Handle("GET /.well-known/openid-configuration", cfg.WellKnown.Discovery())
 	mux.Handle("GET /keys", cfg.WellKnown.JWKS())
 	mux.Handle("GET /.well-known/jwks.json", cfg.WellKnown.JWKS())
-	return mux
+	return cors(cfg.CORSOrigins, mux)
+}
+
+// cors lets the listed origins call the sign-in surface from a browser. It
+// answers an OPTIONS preflight from an allowed origin itself and adds the
+// allow-origin header to the real responses; any other origin gets neither,
+// and the browser blocks the call. It is applied to /signin only, never to
+// /exchange.
+func cors(origins []string, next http.Handler) http.Handler {
+	if len(origins) == 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("Vary", "Origin")
+		if !slices.Contains(origins, origin) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, DPoP")
+			w.Header().Set("Access-Control-Max-Age", "600")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
