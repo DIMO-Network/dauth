@@ -50,9 +50,10 @@ type clientIPKey struct{}
 // trusted (the ingress controller, say). Only then is X-Forwarded-For read,
 // right to left, and the first address that is not itself trusted is the
 // client: entries to the left of it were written by parties dauth has no
-// reason to believe. An entry that does not parse stops the walk and the
-// peer is used, so a client can never choose its own key. With trusted empty,
-// X-Forwarded-For is ignored altogether.
+// reason to believe. An entry may be a bare address or address:port
+// ([v6]:port); one that is neither, or that carries an IPv6 zone (%...),
+// stops the walk and the peer is used, so a client can never choose its own
+// key. With trusted empty, X-Forwarded-For is ignored altogether.
 func ClientIP(trusted []netip.Prefix) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,15 +73,49 @@ func RemoteIP(r *http.Request) string {
 	return peerIP(r)
 }
 
+// peerIP is the TCP peer's address, unmapped and without any IPv6 zone.
 func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		return a.Unmap().String()
+		return a.Unmap().WithZone("").String()
 	}
 	return host
+}
+
+// parseHop reads one X-Forwarded-For entry: an address, or address:port as
+// some proxies write it. A zoned IPv6 address is refused: a zone only means
+// something on the host that wrote it.
+func parseHop(hop string) (netip.Addr, bool) {
+	a, err := netip.ParseAddr(hop)
+	if err != nil {
+		ap, perr := netip.ParseAddrPort(hop)
+		if perr != nil {
+			return netip.Addr{}, false
+		}
+		a = ap.Addr()
+	}
+	if a.Zone() != "" {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
+}
+
+// LimitKey is the rate-limit key for a client address: the address itself
+// for IPv4, and its /64 for IPv6, since one subscriber is typically given a
+// whole /64 and could otherwise rotate through it for fresh buckets. Anything
+// that is not an address is its own key.
+func LimitKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	if a = a.Unmap().WithZone(""); a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
 }
 
 func resolveClientIP(r *http.Request, trusted []netip.Prefix) string {
@@ -98,11 +133,11 @@ func resolveClientIP(r *http.Request, trusted []netip.Prefix) string {
 		if hop == "" {
 			continue
 		}
-		a, err := netip.ParseAddr(hop)
-		if err != nil {
+		a, ok := parseHop(hop)
+		if !ok {
 			return peer
 		}
-		if a = a.Unmap(); !inAny(trusted, a) {
+		if !inAny(trusted, a) {
 			return a.String()
 		}
 	}

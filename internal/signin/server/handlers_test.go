@@ -924,3 +924,21 @@ func TestRateLimitZeroDisables(t *testing.T) {
 		require.Equal(t, http.StatusOK, resp.StatusCode, "request %d: %v", i, body)
 	}
 }
+
+// IPv6 clients are limited per /64: addresses in one /64 share a bucket, and
+// another /64 has its own.
+func TestRateLimitIPv6PerSlash64(t *testing.T) {
+	e := newTestEnv(t)
+	ts := e.limitedServer(t, 1) // burst 2
+	challenge := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+
+	resp, body := postAs(t, ts.URL+"/challenge", "2001:db8:1:2::1", challenge)
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:2::2", challenge)
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:2:abcd::3", challenge)
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "a third address in the same /64 shares the bucket: %v", body)
+
+	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:3::1", challenge)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "a different /64 has its own bucket: %v", body)
+}

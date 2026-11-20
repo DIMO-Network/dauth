@@ -214,13 +214,18 @@ func Load() (Config, error) {
 }
 
 // isOrigin reports whether o is a serialized origin as browsers send it:
-// lowercase scheme://host[:port] and nothing else.
+// lowercase scheme://host[:port] and nothing else. Browsers omit a scheme's
+// default port, so https://h:443 and http://h:80 would never match and are
+// refused.
 func isOrigin(o string) bool {
 	if o != strings.ToLower(o) || strings.Contains(o, "*") {
 		return false
 	}
 	u, err := url.Parse(o)
 	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if port := u.Port(); (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
 		return false
 	}
 	return o == u.Scheme+"://"+u.Host

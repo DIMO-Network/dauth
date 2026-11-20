@@ -56,10 +56,12 @@ func NewHandler(cfg Config) http.Handler {
 	return httpmw.ClientIP(cfg.TrustedProxies)(cors(cfg.CORSOrigins, mux))
 }
 
-// rateLimit limits the routes it wraps, together, per client IP (as
-// httpmw.RemoteIP resolves it): perSecond requests a second with a burst of
-// twice that. Over the limit is 429 rate_limited with Retry-After: 1, in the
-// surface's usual error body. perSecond <= 0 turns it off.
+// rateLimit limits the routes it wraps, together, per client (as
+// httpmw.RemoteIP resolves it, keyed by httpmw.LimitKey: an IPv4 address or
+// an IPv6 /64): perSecond requests a second with a burst of twice that. Over
+// the limit is 429 rate_limited with Retry-After: 1, in the surface's usual
+// error body. The buckets live in this process, so the limit is per pod.
+// perSecond <= 0 turns it off.
 func rateLimit(perSecond int) func(http.Handler) http.Handler {
 	if perSecond <= 0 {
 		return func(next http.Handler) http.Handler { return next }
@@ -67,7 +69,7 @@ func rateLimit(perSecond int) func(http.Handler) http.Handler {
 	limiter := httpmw.NewKeyedLimiter(float64(perSecond), 2*perSecond, maxLimitedClients)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.Allow(httpmw.RemoteIP(r)) {
+			if !limiter.Allow(httpmw.LimitKey(httpmw.RemoteIP(r))) {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, "rate_limited", "too many sign-in requests from this address, retry shortly")
 				return

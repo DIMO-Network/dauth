@@ -155,7 +155,7 @@ func TestLoadApproveTTLDefaultFollowsShortTokenTTL(t *testing.T) {
 }
 
 func TestLoadValidatesCORSOrigins(t *testing.T) {
-	for _, ok := range []string{"https://login.dimo.org", "http://localhost:3000", "capacitor://localhost", "https://[::1]:8443"} {
+	for _, ok := range []string{"https://login.dimo.org", "http://localhost:3000", "capacitor://localhost", "https://[::1]:8443", "https://login.dimo.org:8443", "http://localhost:443"} {
 		setMinimalEnv(t)
 		t.Setenv("SIGNIN_CORS_ORIGINS", ok)
 		_, err := Load()
@@ -164,7 +164,7 @@ func TestLoadValidatesCORSOrigins(t *testing.T) {
 	for _, bad := range []string{
 		"https://login.dimo.org/", "https://login.dimo.org/path", "https://Login.dimo.org", "HTTPS://login.dimo.org",
 		"*", "https://*.dimo.org", "login.dimo.org", "https://login.dimo.org?x=1", "https://login.dimo.org#f",
-		"https://user@login.dimo.org",
+		"https://user@login.dimo.org", "https://login.dimo.org:443", "http://localhost:80",
 	} {
 		setMinimalEnv(t)
 		t.Setenv("SIGNIN_CORS_ORIGINS", "https://console.dimo.org,"+bad)
