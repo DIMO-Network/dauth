@@ -42,10 +42,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// maxOutstandingChallenges bounds the in-memory nonce store. At ~400 bytes per
-// challenge this is well under 100 MiB even when full, and full only happens
-// under a challenge flood, where rejecting new challenges is the right answer.
-const maxOutstandingChallenges = 100_000
+// maxOutstandingChallenges bounds the in-memory nonce store. One challenge was
+// measured at about 1.3 KB held in the store. The chart limits the pod to
+// 256 MiB (values.yaml and values-prod.yaml), and the store may take about a
+// quarter of that: 64 MiB / 1.3 KB ≈ 51,600, so 50,000 challenges ≈ 65 MB
+// (62 MiB) when full. Full only happens under a challenge flood, where
+// rejecting new challenges is the right answer. Revisit this if the chart's
+// memory limit changes.
+const maxOutstandingChallenges = 50_000
 
 // selfTokenTTL is the lifetime of the identity token dauth mints for itself
 // to call the org host with; it is renewed before it runs out.

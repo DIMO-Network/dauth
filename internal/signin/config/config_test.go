@@ -134,3 +134,22 @@ func TestLoadReadsCORSOrigins(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"https://login.dimo.org", "https://console.dimo.org"}, cfg.CORSOrigins)
 }
+
+func TestLoadApproveTTLDefaultFollowsShortTokenTTL(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("TOKEN_TTL", "2m")
+	cfg, err := Load()
+	require.NoError(t, err, "setting only a short TOKEN_TTL must not break startup")
+	assert.Equal(t, 2*time.Minute, cfg.ApproveTTL)
+
+	t.Setenv("TOKEN_TTL", "1h")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute, cfg.ApproveTTL, "the default stays 5m under a longer TOKEN_TTL")
+
+	t.Setenv("TOKEN_TTL", "2m")
+	t.Setenv("APPROVE_TOKEN_TTL", "3m")
+	_, err = Load()
+	require.Error(t, err, "an explicit APPROVE_TOKEN_TTL above TOKEN_TTL is still refused")
+	assert.Contains(t, err.Error(), "APPROVE_TOKEN_TTL")
+}

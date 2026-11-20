@@ -33,6 +33,9 @@ const maxDPoPBytes = 4096
 // jktPattern is a SHA-256 thumbprint in base64url without padding.
 var jktPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
+// maxAudiences caps how many audiences one challenge may request.
+const maxAudiences = 10
+
 // ProofVerifier checks a DPoP proof and returns the thumbprint of the key that
 // made it. did-directory's *dpop.Verifier is one; it records each accepted
 // proof's jti, which is why /token only calls it for a live challenge.
@@ -75,8 +78,10 @@ type challengeRequest struct {
 	// key that will sign the challenge.
 	DID string `json:"did"`
 	// Audience optionally requests a specific `aud` for the issued token. Every
-	// value must be on the server's allow-list (SIGNIN_ALLOWED_AUDIENCES) or the
-	// challenge is rejected. Omit it to receive the configured default audience.
+	// value must be on the server's allow-list (SIGNIN_ALLOWED_AUDIENCES), at
+	// most maxAudiences and none twice, or the challenge is rejected. The order
+	// is kept as sent: the challenge text names the values in it. Omit it to
+	// receive the configured default audience.
 	Audience []string `json:"audience,omitempty"`
 	// Scope is what the token may do: space-separated, one or more of read,
 	// write and approve (did-directory pkg/identity). Required.
@@ -134,7 +139,16 @@ func (h *Handlers) Challenge() http.Handler {
 		// the nonce now, so the `aud` is fixed at challenge time and cannot be
 		// swapped at /token. An empty Audience falls through to the issuer's
 		// default. Reject before a nonce is created so a disallowed request never
-		// yields a usable challenge.
+		// yields a usable challenge. The list is never reordered or deduplicated:
+		// clients check the challenge's "For:" line against what they sent.
+		if len(req.Audience) > maxAudiences {
+			writeError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("at most %d audiences may be requested", maxAudiences))
+			return
+		}
+		if hasDuplicate(req.Audience) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "audience lists a value more than once")
+			return
+		}
 		if !h.audienceAllowed(req.Audience) {
 			writeError(w, http.StatusBadRequest, "invalid_request", "requested audience is not allowed")
 			return
@@ -311,6 +325,18 @@ func (h *Handlers) challengeLookupFailed(w http.ResponseWriter, err error) {
 	}
 	h.Log.Warn().Err(err).Msg("reading challenge")
 	writeError(w, http.StatusServiceUnavailable, "server_error", "challenge store unavailable, retry shortly")
+}
+
+// hasDuplicate reports whether any value appears in list more than once.
+func hasDuplicate(list []string) bool {
+	seen := make(map[string]bool, len(list))
+	for _, v := range list {
+		if seen[v] {
+			return true
+		}
+		seen[v] = true
+	}
+	return false
 }
 
 // audienceAllowed reports whether a requested audience may be honored. An empty

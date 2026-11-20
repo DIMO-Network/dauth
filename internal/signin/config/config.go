@@ -16,12 +16,11 @@ import (
 
 // Config is the process-wide configuration plus the sign-in surface's own.
 type Config struct {
-	Environment string
-	LogLevel    string
+	LogLevel string
 
 	// HTTP servers. One public listener serves both the /signin and /exchange
-	// surfaces; the ops listener serves probes + Prometheus. TLS termination,
-	// rate limiting, and request-size limits are handled at the ingress.
+	// surfaces; the ops listener serves probes + Prometheus. TLS terminates at
+	// the ingress. There is no rate limit in dauth or in the chart's ingress.
 	HTTPAddr string // HTTP_ADDRESS — public server (both prefixes)
 	OpsAddr  string // OPS_ADDRESS  — probes + Prometheus
 
@@ -55,7 +54,10 @@ type Config struct {
 	// Lifetimes.
 	ChallengeTTL time.Duration // CHALLENGE_TTL
 	TokenTTL     time.Duration // TOKEN_TTL: identity tokens without the approve scope
-	ApproveTTL   time.Duration // APPROVE_TOKEN_TTL: tokens carrying approve, kept short
+	// ApproveTTL is APPROVE_TOKEN_TTL: tokens carrying approve, kept short.
+	// Unset, it is the shorter of 5m and TokenTTL; set, it may not exceed
+	// TokenTTL.
+	ApproveTTL time.Duration
 
 	// Signing keys (SIGNIN_SIGNING_KEY_n), in priority order: the first is the
 	// active signer; the rest are retiring keys kept in the JWKS so their tokens
@@ -79,7 +81,6 @@ func (s Config) UsePostgres() bool { return s.DatabaseURL != "" }
 // required value is missing or malformed.
 func Load() (Config, error) {
 	s := Config{
-		Environment:      envx.String("ENVIRONMENT", "dev"),
 		LogLevel:         envx.String("LOG_LEVEL", "info"),
 		HTTPAddr:         envx.String("HTTP_ADDRESS", "0.0.0.0:8080"),
 		OpsAddr:          envx.String("OPS_ADDRESS", "0.0.0.0:8081"),
@@ -135,15 +136,18 @@ func Load() (Config, error) {
 	if s.TokenTTL, err = envx.Duration("TOKEN_TTL", 15*time.Minute); err != nil {
 		return s, err
 	}
-	if s.ApproveTTL, err = envx.Duration("APPROVE_TOKEN_TTL", 5*time.Minute); err != nil {
+	// The approve default follows a short TOKEN_TTL down, so setting only
+	// TOKEN_TTL below 5m does not trip the check below.
+	if s.ApproveTTL, err = envx.Duration("APPROVE_TOKEN_TTL", min(5*time.Minute, s.TokenTTL)); err != nil {
 		return s, err
 	}
 
-	for name, d := range map[string]time.Duration{
-		"CHALLENGE_TTL": s.ChallengeTTL, "TOKEN_TTL": s.TokenTTL, "APPROVE_TOKEN_TTL": s.ApproveTTL,
-	} {
-		if d <= 0 {
-			return s, fmt.Errorf("%s must be greater than zero, got %s", name, d)
+	for _, ttl := range []struct {
+		name string
+		d    time.Duration
+	}{{"CHALLENGE_TTL", s.ChallengeTTL}, {"TOKEN_TTL", s.TokenTTL}, {"APPROVE_TOKEN_TTL", s.ApproveTTL}} {
+		if ttl.d <= 0 {
+			return s, fmt.Errorf("%s must be greater than zero, got %s", ttl.name, ttl.d)
 		}
 	}
 	if s.ApproveTTL > s.TokenTTL {

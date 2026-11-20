@@ -124,9 +124,10 @@ func (v *Verifier) Verify(ctx context.Context, did, fragment string, data []byte
 const maxDIDLen = 128
 
 // didPattern is the DID-core charset: the scheme, a lowercase method, and a
-// method-specific id of letters, digits and . _ : % -. It admits no / ? # or
-// whitespace, so a DID cannot rewrite the directory request path.
-var didPattern = regexp.MustCompile(`^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$`)
+// method-specific id of letters, digits, . _ : - and percent-encoded octets
+// (% and two hex digits). It admits no / ? # or whitespace, so a DID cannot
+// rewrite the directory request path.
+var didPattern = regexp.MustCompile(`^did:[a-z0-9]+:(?:[A-Za-z0-9._:-]|%[0-9A-Fa-f]{2})+$`)
 
 // isDID is the syntactic check on a DID, applied before anything is stored or
 // resolved. The directory decides whether it exists.

@@ -341,6 +341,11 @@ func TestIsDID(t *testing.T) {
 	assert.False(t, isDID("did:dimo:a?b"))
 	assert.False(t, isDID("did:dimo:a b"))
 	assert.True(t, isDID("did:web:example.com%3A3000:u"))
+	assert.True(t, isDID("did:web:example.com%3a3000"))
+	assert.False(t, isDID("did:dimo:a%"))
+	assert.False(t, isDID("did:dimo:a%3"))
+	assert.False(t, isDID("did:dimo:a%zz"))
+	assert.False(t, isDID("did:dimo:%"))
 	assert.True(t, isDID("did:dimo:"+strings.Repeat("a", 128-len("did:dimo:"))))
 	assert.False(t, isDID("did:dimo:"+strings.Repeat("a", 200)))
 }
@@ -438,7 +443,39 @@ func TestCORS(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
 		assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Empty(t, resp.Header.Values("Vary"))
 	})
+	// With origins configured, every response varies on Origin, so a shared
+	// cache never hands one origin's answer (or a no-Origin answer) to another.
+	t.Run("vary without origin", func(t *testing.T) {
+		for _, path := range []string{"/keys", "/.well-known/openid-configuration", "/nope"} {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+			assert.Contains(t, resp.Header.Values("Vary"), "Origin", path)
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"), path)
+		}
+		status, header := postTo(t, ts.URL+"/challenge", map[string]any{"did": "nope"})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Contains(t, header.Values("Vary"), "Origin", "POST /challenge")
+	})
+	t.Run("vary with disallowed origin", func(t *testing.T) {
+		resp, err := http.DefaultClient.Do(mustReq(t, http.MethodGet, ts.URL+"/keys", "https://evil.test"))
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Contains(t, resp.Header.Values("Vary"), "Origin")
+	})
+}
+
+// postTo posts body as JSON to url and returns the status and headers.
+func postTo(t *testing.T, url string, body any) (int, http.Header) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(raw))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	return resp.StatusCode, resp.Header
 }
 
 func mustReq(t *testing.T, method, url, origin string) *http.Request {
@@ -645,4 +682,35 @@ func TestChallengeStoresResolvedAudience(t *testing.T) {
 		ParseWithClaims(body["token"].(string), &claims, func(*jwt.Token) (any, error) { return e.pub, nil })
 	require.NoError(t, err)
 	assert.Equal(t, jwt.ClaimStrings{"dimo"}, claims.Audience)
+}
+
+func TestChallengeAudienceRules(t *testing.T) {
+	e := newTestEnv(t)
+	many := make([]string, maxAudiences+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("aud-%d", i)
+	}
+	e.handlers.AllowedAudiences = append([]string{"a", "b"}, many...)
+	req := func(aud []string) (int, map[string]any) {
+		return e.post(t, "/challenge", map[string]any{"did": testDID, "audience": aud, "scope": "read", "jkt": e.holder.Thumbprint()})
+	}
+
+	status, body := req([]string{"a", "b", "a"})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_request", body["error"])
+
+	status, body = req(many)
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_request", body["error"])
+
+	status, body = req(many[:maxAudiences])
+	assert.Equal(t, http.StatusOK, status, body, "exactly the cap is allowed")
+
+	// The order sent is the order signed and stamped: never sorted or deduped.
+	status, body = req([]string{"b", "a"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Contains(t, body["challenge"], "\nFor: b, a\n")
+	stored, err := e.handlers.Store.Peek(context.Background(), body["nonce"].(string))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b", "a"}, stored.Audience)
 }

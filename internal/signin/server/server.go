@@ -12,9 +12,9 @@ import (
 	"github.com/DIMO-Network/dauth/internal/oidc"
 )
 
-// maxBodyBytes caps request bodies on the write endpoints. TLS, rate limiting,
-// and any larger request-size policy are handled at the ingress; this is a cheap
-// in-process belt against malformed giant bodies.
+// maxBodyBytes caps request bodies on the write endpoints: a cheap in-process
+// belt against malformed giant bodies. TLS terminates at the ingress. dauth
+// applies no rate limit of its own, and the chart's ingress sets none either.
 const maxBodyBytes = 16 << 10 // 16 KiB
 
 // Config configures the sign-in surface.
@@ -44,20 +44,18 @@ func NewHandler(cfg Config) http.Handler {
 // cors lets the listed origins call the sign-in surface from a browser. It
 // answers an OPTIONS preflight from an allowed origin itself and adds the
 // allow-origin header to the real responses; any other origin gets neither,
-// and the browser blocks the call. It is applied to /signin only, never to
+// and the browser blocks the call. Every response carries Vary: Origin, with
+// or without an Origin header on the request, so a shared cache never serves
+// one origin's answer to another. It is applied to /signin only, never to
 // /exchange.
 func cors(origins []string, next http.Handler) http.Handler {
 	if len(origins) == 0 {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		w.Header().Add("Vary", "Origin")
-		if !slices.Contains(origins, origin) {
+		origin := r.Header.Get("Origin")
+		if origin == "" || !slices.Contains(origins, origin) {
 			next.ServeHTTP(w, r)
 			return
 		}
