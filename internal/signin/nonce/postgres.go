@@ -33,16 +33,42 @@ type Postgres struct {
 	log zerolog.Logger
 }
 
+// schemaLockKey is the pg_advisory_xact_lock key that serializes schema
+// bootstrap across replicas starting at once. It is a fixed, arbitrary
+// constant ("dauthnce" in ASCII); anything else in the database that takes an
+// advisory lock must not reuse it.
+const schemaLockKey int64 = 0x64617574686e6365
+
 // NewPostgres ensures the schema exists on db and starts a background janitor
 // that evicts expired challenges until ctx is cancelled. The caller owns db's
 // lifecycle (open and Close).
 func NewPostgres(ctx context.Context, db *pgxpool.Pool, log zerolog.Logger) (*Postgres, error) {
-	if _, err := db.Exec(ctx, schema); err != nil {
+	if err := ensureSchema(ctx, db); err != nil {
 		return nil, fmt.Errorf("ensuring nonce schema: %w", err)
 	}
 	p := &Postgres{db: db, now: time.Now, log: log}
 	go p.janitor(ctx)
 	return p, nil
+}
+
+// ensureSchema applies schema.sql under a transaction-scoped advisory lock.
+// CREATE TABLE IF NOT EXISTS is not safe against itself: two replicas running
+// it at once on a fresh database can both pass the existence check and one
+// then fails on the catalog's unique index. The lock makes them take turns;
+// it is released when the transaction ends.
+func ensureSchema(ctx context.Context, db *pgxpool.Pool) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, schemaLockKey); err != nil {
+		return fmt.Errorf("taking schema lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, schema); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Put inserts ch under id. A duplicate nonce (astronomically unlikely for 32

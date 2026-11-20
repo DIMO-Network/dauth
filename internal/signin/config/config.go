@@ -49,6 +49,8 @@ type Config struct {
 
 	// CORSOrigins are the browser origins allowed to call /signin
 	// (SIGNIN_CORS_ORIGINS, comma-separated). Empty sends no CORS headers.
+	// Each must be exactly what a browser sends in Origin: lowercase
+	// scheme://host[:port], no path, no trailing slash, no wildcard.
 	CORSOrigins []string
 
 	// Lifetimes.
@@ -91,6 +93,16 @@ func Load() (Config, error) {
 		Audience:         envx.List(os.Getenv("JWT_AUDIENCE")),
 		AllowedAudiences: envx.List(os.Getenv("SIGNIN_ALLOWED_AUDIENCES")),
 		CORSOrigins:      envx.List(os.Getenv("SIGNIN_CORS_ORIGINS")),
+	}
+	for _, o := range s.CORSOrigins {
+		if !isOrigin(o) {
+			return s, fmt.Errorf("SIGNIN_CORS_ORIGINS entries must be lowercase scheme://host[:port] with no path, trailing slash or wildcard, as a browser sends Origin; got %q", o)
+		}
+	}
+	for _, a := range s.AllowedAudiences {
+		if strings.HasSuffix(a, "/") {
+			return s, fmt.Errorf("SIGNIN_ALLOWED_AUDIENCES entries must not end in '/': audiences are compared exactly, and clients send them without one; got %q", a)
+		}
 	}
 
 	if s.Issuer == "" {
@@ -174,4 +186,17 @@ func Load() (Config, error) {
 	}
 
 	return s, nil
+}
+
+// isOrigin reports whether o is a serialized origin as browsers send it:
+// lowercase scheme://host[:port] and nothing else.
+func isOrigin(o string) bool {
+	if o != strings.ToLower(o) || strings.Contains(o, "*") {
+		return false
+	}
+	u, err := url.Parse(o)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	return o == u.Scheme+"://"+u.Host
 }

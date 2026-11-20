@@ -153,3 +153,37 @@ func TestLoadApproveTTLDefaultFollowsShortTokenTTL(t *testing.T) {
 	require.Error(t, err, "an explicit APPROVE_TOKEN_TTL above TOKEN_TTL is still refused")
 	assert.Contains(t, err.Error(), "APPROVE_TOKEN_TTL")
 }
+
+func TestLoadValidatesCORSOrigins(t *testing.T) {
+	for _, ok := range []string{"https://login.dimo.org", "http://localhost:3000", "capacitor://localhost", "https://[::1]:8443"} {
+		setMinimalEnv(t)
+		t.Setenv("SIGNIN_CORS_ORIGINS", ok)
+		_, err := Load()
+		assert.NoError(t, err, ok)
+	}
+	for _, bad := range []string{
+		"https://login.dimo.org/", "https://login.dimo.org/path", "https://Login.dimo.org", "HTTPS://login.dimo.org",
+		"*", "https://*.dimo.org", "login.dimo.org", "https://login.dimo.org?x=1", "https://login.dimo.org#f",
+		"https://user@login.dimo.org",
+	} {
+		setMinimalEnv(t)
+		t.Setenv("SIGNIN_CORS_ORIGINS", "https://console.dimo.org,"+bad)
+		_, err := Load()
+		require.Error(t, err, bad)
+		assert.Contains(t, err.Error(), "SIGNIN_CORS_ORIGINS", bad)
+		assert.Contains(t, err.Error(), bad)
+	}
+}
+
+func TestLoadRejectsTrailingSlashAudience(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("SIGNIN_ALLOWED_AUDIENCES", "https://accounts.dimo.org,https://other.dimo.org/")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SIGNIN_ALLOWED_AUDIENCES")
+	assert.Contains(t, err.Error(), "https://other.dimo.org/")
+
+	t.Setenv("SIGNIN_ALLOWED_AUDIENCES", "https://accounts.dimo.org,https://other.dimo.org")
+	_, err = Load()
+	assert.NoError(t, err)
+}

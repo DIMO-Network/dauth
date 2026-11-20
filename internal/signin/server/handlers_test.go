@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,6 +155,30 @@ func (e *testEnv) postWith(t *testing.T, path, proof string, body any) (int, map
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(data, &out), string(data))
 	return resp.StatusCode, out
+}
+
+// tryPost is postWith without testing.T, for goroutines: it returns errors
+// instead of failing the test.
+func (e *testEnv) tryPost(path, proof string, body any) (int, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequest(http.MethodPost, e.ts.URL+path, bytes.NewReader(raw))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if proof != "" {
+		req.Header.Set(dpop.HeaderName, proof)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, err = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, err
 }
 
 func (e *testEnv) challenge(t *testing.T, did string) (string, string) {
@@ -637,31 +662,34 @@ func TestTokenConcurrentRedeem(t *testing.T) {
 		require.NoError(t, err)
 		proofs[i] = p
 	}
-	statuses := make(chan int, racers)
+	// The goroutines only send results back: require (t.FailNow) must run on
+	// the test goroutine.
+	type result struct {
+		status int
+		err    error
+	}
+	results := make(chan result, racers)
 	start := make(chan struct{})
-	var wg sync.WaitGroup
 	for _, proof := range proofs {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			<-start
-			status, _ := e.postWith(t, "/token", proof, map[string]any{"nonce": n, "signature": sig})
-			statuses <- status
+			status, err := e.tryPost("/token", proof, map[string]any{"nonce": n, "signature": sig})
+			results <- result{status, err}
 		}()
 	}
 	close(start)
-	wg.Wait()
-	close(statuses)
 
 	var ok, refused int
-	for status := range statuses {
-		switch status {
+	for range racers {
+		res := <-results
+		require.NoError(t, res.err)
+		switch res.status {
 		case http.StatusOK:
 			ok++
 		case http.StatusUnauthorized:
 			refused++
 		default:
-			t.Errorf("unexpected status %d", status)
+			t.Errorf("unexpected status %d", res.status)
 		}
 	}
 	assert.Equal(t, 1, ok, "exactly one redemption must win")
@@ -796,4 +824,26 @@ func TestTokenWrongKeyProofsNeverVerified(t *testing.T) {
 	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sig})
 	assert.Equal(t, http.StatusOK, status, body)
 	assert.Equal(t, 1, counter.count(), "only the right key's proof is verified")
+}
+
+// The directory client applies isDID itself, so a DID from any caller (an
+// /exchange client assertion's iss included) cannot reach the directory with
+// a path in it.
+func TestDirectoryClientRefusesInvalidDIDs(t *testing.T) {
+	var hits atomic.Int32
+	dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	t.Cleanup(dir.Close)
+	dc := &DirectoryClient{Client: client.New(dir.URL)}
+
+	for _, did := range []string{"did:dimo:../../admin", "did:dimo:a/../../health", "did:dimo:a?x=1", "did:dimo:a:", "did:"} {
+		_, err := dc.VerificationMethods(context.Background(), did)
+		assert.ErrorIs(t, err, ErrDIDUnusable, did)
+	}
+	assert.Zero(t, hits.Load(), "no invalid DID may reach the directory")
+
+	_, err := dc.VerificationMethods(context.Background(), "did:dimo:valid")
+	assert.ErrorIs(t, err, ErrDIDNotFound, "a valid DID is still resolved")
 }

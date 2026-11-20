@@ -35,14 +35,16 @@ type VerificationMethod struct {
 type Directory interface {
 	// VerificationMethods resolves did and returns its verification methods.
 	// It returns ErrDIDNotFound for a DID the directory does not hold (404),
-	// wraps ErrDIDUnusable for one it will never serve (400, 410, 422), and
+	// wraps ErrDIDUnusable for one it will never serve (400, 410, 422) or
+	// that is not a valid DID (isDID; no request is made), and
 	// wraps ErrDirectory for any other failure, which a retry may get past.
 	VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error)
 }
 
 // ErrDIDUnusable means the directory will not serve a document for the DID:
-// it was deactivated (410), or the directory refused the request as malformed
-// (400, 422). Retrying cannot help, so the sign-in is refused.
+// it was deactivated (410), the directory refused the request as malformed
+// (400, 422), or the DID is not syntactically valid and was never sent.
+// Retrying cannot help, so the sign-in is refused.
 var ErrDIDUnusable = errors.New("DID not usable")
 
 // resolveTimeout bounds one directory resolve.
@@ -53,8 +55,14 @@ type DirectoryClient struct {
 	Client *client.Client
 }
 
-// VerificationMethods implements Directory.
+// VerificationMethods implements Directory. A DID that fails isDID is
+// refused before any request is made, so nothing a caller supplies (an
+// /exchange client assertion's iss, say) can rewrite the directory request
+// path.
 func (d *DirectoryClient) VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error) {
+	if !isDID(did) {
+		return nil, fmt.Errorf("%w: not a valid DID", ErrDIDUnusable)
+	}
 	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
 	doc, err := d.Client.Resolve(ctx, did)

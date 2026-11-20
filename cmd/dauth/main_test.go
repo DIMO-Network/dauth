@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,4 +100,23 @@ func TestAssertionDirectoryStatusMapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An /exchange client assertion whose iss is a DID with a path in it passes
+// the exchange's own loose DID check, but the shared directory client refuses
+// it before any request: an invalid client, never a directory call.
+func TestAssertionPathTraversalDIDNeverReachesDirectory(t *testing.T) {
+	const aud, jkt = "https://auth.test/exchange", "jkt"
+	var hits atomic.Int32
+	dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	t.Cleanup(dir.Close)
+	v := newAssertionVerifier(newDIDVerifier(dir.URL), aud)
+
+	_, err := v.Verify(context.Background(), unsignedAssertion(t, "did:dimo:../../admin", aud, jkt), jkt)
+	assert.ErrorIs(t, err, exchange.ErrInvalidAssertion)
+	assert.NotErrorIs(t, err, exchange.ErrAssertionKeys)
+	assert.Zero(t, hits.Load(), "the directory must not be called")
 }

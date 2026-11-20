@@ -2,6 +2,7 @@ package nonce
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -167,4 +168,53 @@ func TestPostgres_WrongKeyLeavesChallenge(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 	_, err = p.Consume(ctx, "n", "k")
 	assert.NoError(t, err, "a consume naming another key must not spend the challenge")
+}
+
+// Replicas starting together all bootstrap the schema at once. Each run is in
+// a fresh, randomly named schema so the CREATE TABLE IF NOT EXISTS race is
+// real, and every concurrent NewPostgres must succeed.
+func TestPostgres_ConcurrentSchemaBootstrap(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres challenge store tests")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	admin, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	for round := range 5 {
+		name := fmt.Sprintf("bootstrap_%d_%d", time.Now().UnixNano(), round)
+		_, err := admin.Exec(ctx, `CREATE SCHEMA `+name)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, err := admin.Exec(context.Background(), `DROP SCHEMA `+name+` CASCADE`)
+			assert.NoError(t, err)
+		})
+
+		cfg, err := pgxpool.ParseConfig(dsn)
+		require.NoError(t, err)
+		cfg.ConnConfig.RuntimeParams["search_path"] = name
+		cfg.MaxConns = 16
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+
+		const replicas = 8
+		errs := make(chan error, replicas)
+		start := make(chan struct{})
+		for range replicas {
+			go func() {
+				<-start
+				_, err := NewPostgres(ctx, pool, zerolog.Nop())
+				errs <- err
+			}()
+		}
+		close(start)
+		for range replicas {
+			assert.NoError(t, <-errs, "round %d", round)
+		}
+	}
 }

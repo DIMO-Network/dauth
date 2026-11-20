@@ -263,8 +263,8 @@ arithmetic.
 | `SIGNIN_ISSUER` | yes | | `iss` of identity tokens |
 | `SIGNIN_DOMAIN` | | host of `PUBLIC_BASE_URL` | Shown in the challenge text |
 | `JWT_AUDIENCE` | yes | | Default `aud` of identity tokens (comma-separated) |
-| `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead |
-| `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated); empty sends no CORS headers |
+| `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead; none may end in `/` |
+| `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated), each exactly as a browser sends `Origin`: lowercase `scheme://host[:port]`, no path, trailing `/` or `*`; empty sends no CORS headers |
 | `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active; must differ from the `/exchange` keys |
 | `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, the shorter of `5m` and `TOKEN_TTL` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and, when set, may not exceed `TOKEN_TTL` |
 | `DATABASE_URL` | | | Postgres challenge store; unset = in-memory, single replica |
@@ -309,8 +309,11 @@ the ops port (`/ping`, `/ready`, `/metrics`). Rendering fails when
 `replicaCount` is above 1 and `postgres.enabled` is false: the in-memory
 challenge store is per pod, so more replicas need the Postgres store. The
 in-memory store holds at most 50,000 challenges, sized to the chart's 256 MiB
-memory limit. dauth has no rate limit of its own, and the chart's ingress sets
-none.
+memory limit. With Postgres disabled, a rolling deploy also drops every
+challenge in flight: the new pod starts with an empty store, so a client that
+asked the old pod for a challenge gets `invalid_grant` at `/signin/token` and
+must start again. dauth has no rate limit of its own, and the chart's ingress
+sets none.
 
 `values-prod.yaml` sets `requireExchangeConfig: true`: rendering fails unless
 `env.ORG_HOST_URL` and `env.DAUTH_DID` are set to real values (no
