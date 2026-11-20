@@ -4,6 +4,13 @@ env:
   HTTP_ADDRESS: "0.0.0.0:8080"
   OPS_ADDRESS: "0.0.0.0:8081"
   PUBLIC_BASE_URL: https://dauth.dimo.zone
+  # --- sign-in surface (/signin) ---
+  SIGNIN_ISSUER: https://dauth.dimo.zone/signin
+  DIRECTORY_URL: http://did-directory-prod:8080
+  # Must equal accounts' ACCOUNTS_PUBLIC_URL exactly.
+  SIGNIN_ALLOWED_AUDIENCES: https://accounts.dimo.org
+  # Browser origins allowed to call /signin (login and console).
+  SIGNIN_CORS_ORIGINS: https://login.dimo.org,https://console.dimo.org
   # --- sign-in surface (/siwe) ---
   SIWE_ISSUER: https://dauth.dimo.zone/siwe
   JWT_AUDIENCE: dimo

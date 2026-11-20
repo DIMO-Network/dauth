@@ -30,6 +30,10 @@ env:
   DIRECTORY_URL: http://did-directory-dev:8080
   SIGNIN_ISSUER: https://dauth.dev.dimo.zone/signin
   JWT_AUDIENCE: dimo
+  # Must equal accounts' ACCOUNTS_PUBLIC_URL exactly.
+  SIGNIN_ALLOWED_AUDIENCES: https://accounts.dev.dimo.org
+  # Browser origins allowed to call /signin (login and console).
+  SIGNIN_CORS_ORIGINS: https://login.dev.dimo.org,https://console-staging.dimo.org
   CHALLENGE_TTL: 5m
   TOKEN_TTL: 1h
   EXCHANGE_ISSUER: https://dauth.dev.dimo.zone/exchange

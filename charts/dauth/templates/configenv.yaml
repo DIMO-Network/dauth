@@ -6,6 +6,9 @@ metadata:
   labels:
 {{ include "dauth.labels" . | indent 4 }}
 data:
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.postgres.enabled) }}
+{{- fail "replicaCount > 1 needs postgres.enabled: the in-memory challenge store is per pod" }}
+{{- end }}
 {{- range $key, $val := .Values.env }}
   {{ $key }} : {{ $val | quote }}
 {{- end }}

@@ -6,13 +6,29 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     if: "!contains(github.event.head_commit.message, 'Merge pull request')"
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: 'go.mod'
       - name: Build
@@ -20,4 +36,6 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: go test ./...

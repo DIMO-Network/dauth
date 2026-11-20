@@ -4,18 +4,24 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
+  # Holds the Docker Hub login, and nothing that writes to the repository.
   build:
     name: buildpushdev
     runs-on: ubuntu-latest
+    outputs:
+      sha7: ${{ steps.slug.outputs.sha7 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Login to DockerHub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -25,7 +31,7 @@ jobs:
         run: echo "sha7=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push dauth
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ./docker/dockerfile
@@ -33,11 +39,21 @@ jobs:
           platforms: linux/amd64
           tags: dimozone/dauth:${{ steps.slug.outputs.sha7 }}, dimozone/dauth:latest
 
+  # Writes the new image tag back to the repo. No Docker Hub login here.
+  update-values:
+    name: update-values
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
       - name: Update dauth image tag
-        uses: fjogeleit/yaml-update-action@master
+        uses: fjogeleit/yaml-update-action@dffe9a5223d84653c13374032382f6bb5de8e5ef # v0.17.0
         with:
           valueFile: "charts/dauth/values.yaml"
           propertyPath: "image.tag"
-          value: ${{ steps.slug.outputs.sha7 }}
+          value: ${{ needs.build.outputs.sha7 }}
           branch: main
-          message: "Update dauth image to ${{ steps.slug.outputs.sha7 }}"
+          message: "Update dauth image to ${{ needs.build.outputs.sha7 }}"
