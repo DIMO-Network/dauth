@@ -35,7 +35,6 @@ env:
   # Browser origins allowed to call /signin (login and console).
   SIGNIN_CORS_ORIGINS: https://login.dev.dimo.org,https://console-staging.dimo.org
   CHALLENGE_TTL: 5m
-  TOKEN_TTL: 1h
   EXCHANGE_ISSUER: https://dauth.dev.dimo.zone/exchange
   EXCHANGE_AUDIENCE: dq
   ORG_HOST_URL: http://org-host-dev:8081

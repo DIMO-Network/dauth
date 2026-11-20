@@ -28,9 +28,9 @@ DPoP replay cache.
 | [Sign-in](#signin--identity-tokens) | `/signin` | Identity token (`sub` = DID) | `https://dauth.dimo.zone/signin` | `…/signin/keys` |
 | [Exchange](#exchange--access-tokens) | `/exchange` | Access token (`grants`, `cnf`) | `https://dauth.dimo.zone/exchange` | `…/exchange/keys` |
 
-The public packages `pkg/tokenclaims` (the access token claim set, with the
-window arithmetic dq clamps by) and `pkg/dpop` (proof creation and
-verification) are consumed by downstream repos.
+The public package `pkg/tokenclaims` (the access token claim set, with the
+window arithmetic dq clamps by) is consumed by downstream repos. DPoP proofs
+are made and checked with did-directory's `pkg/dpop`.
 
 ---
 
@@ -89,9 +89,12 @@ key the token will be bound to. An unknown scope is `invalid_scope`.
 `audience` names the service the token is for, and every service that takes
 these tokens checks it: the exchange accepts only `<PUBLIC_BASE_URL>/exchange`,
 the org host only its own URL. Those two may always be requested; anything
-else must be on `SIGNIN_ALLOWED_AUDIENCES`. Omitted, the token carries
-`JWT_AUDIENCE`, which neither the exchange nor the org host accepts. Returns
-`{ challenge, nonce, expires_at }`.
+else must be on `SIGNIN_ALLOWED_AUDIENCES`. At most 10 values, none repeated
+(`invalid_request` otherwise); they are kept in the order sent, and the
+challenge's `For:` line lists them in that order. Omitted, the token carries
+`JWT_AUDIENCE`, which neither the exchange nor the org host accepts. The
+audience is fixed when the challenge is issued: the token's `aud` is exactly
+the `For:` line. Returns `{ challenge, nonce, expires_at }`.
 
 ### `POST /signin/token`
 
@@ -101,14 +104,18 @@ else must be on `SIGNIN_ALLOWED_AUDIENCES`. Omitted, the token carries
 
 `key` is the verification method fragment, default `signing`. The request
 carries `DPoP: <proof>` for `POST <PUBLIC_BASE_URL>/signin/token` from the key
-the challenge named; a missing proof does not spend the challenge. Returns
+the challenge named. An unknown, used or expired nonce is refused before the
+proof is checked, and neither a missing proof nor a proof from another key
+spends the challenge: only a request holding the named key consumes it, and
+of concurrent ones exactly one does. Returns
 `{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
 `APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`
-(400, also for a proof over 4 KiB), `invalid_grant` (401: bad nonce, bad
-signature, unknown or deactivated DID, a DID the directory refuses with a 4xx,
-or unknown key), `server_error` (503 when the directory or challenge store is
-unavailable; get a fresh challenge and retry).
+(400, also for a proof over 4 KiB or from another key), `invalid_grant` (401:
+bad nonce, bad signature, unknown key, or a DID the directory does not hold
+(404) or will not serve (400, 410, 422)), `server_error` (503 when the
+challenge store is unavailable, or the directory does not answer: a timeout,
+408, 429, any other 4xx or a 5xx; get a fresh challenge and retry).
 
 ### Validation surface
 
@@ -119,8 +126,9 @@ unavailable; get a fresh challenge and retry).
 
 Browsers may call `/signin` from the origins in `SIGNIN_CORS_ORIGINS`: an
 allowed origin's preflight is answered with `GET, POST, OPTIONS` and the
-`Content-Type` and `DPoP` headers, and responses carry `Vary: Origin`. Any
-other origin gets no CORS headers, and `/exchange` sends none.
+`Content-Type` and `DPoP` headers. With origins configured, every `/signin`
+response carries `Vary: Origin`, whether or not the request had an `Origin`.
+Any other origin gets no CORS headers, and `/exchange` sends none.
 
 ## Token
 
@@ -203,7 +211,10 @@ Returns `{ token, token_type: "DPoP", expires_in, expires_at }`. Refusals:
 (400), `invalid_request` (400, also when the host cannot read the request),
 the host's own code (403: `not_covered`, `exclusive_hold` with `suspended`,
 `unauthorized`, `revoked`, `not_valid`, …; 404 `not_found`), `server_error`
-(502 when the host is unreachable, 503 when the app's DID cannot be resolved).
+(502 when the host is unreachable, 503 when the directory does not answer for
+the app's DID: a timeout, 408, 429, any other 4xx or a 5xx). An app DID the
+directory does not hold or will not serve (404, 400, 410, 422) is
+`invalid_client`.
 
 ### Validation surface
 
@@ -254,7 +265,7 @@ arithmetic.
 | `SIGNIN_ALLOWED_AUDIENCES` | | | Audiences a challenge may request instead |
 | `SIGNIN_CORS_ORIGINS` | | | Browser origins allowed to call `/signin` (comma-separated); empty sends no CORS headers |
 | `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active; must differ from the `/exchange` keys |
-| `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, `5m` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and may not exceed `TOKEN_TTL` |
+| `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, the shorter of `5m` and `TOKEN_TTL` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and, when set, may not exceed `TOKEN_TTL` |
 | `DATABASE_URL` | | | Postgres challenge store; unset = in-memory, single replica |
 | `EXCHANGE_ISSUER` | yes | | `iss` of access tokens |
 | `EXCHANGE_AUDIENCE` | | `dq` | Default `aud` of access tokens |
@@ -264,7 +275,7 @@ arithmetic.
 | `DAUTH_DID` | yes | | DID dauth presents to the host |
 | `EXCHANGE_LIVE_TTL`, `EXCHANGE_HISTORICAL_TTL` | | `15m`, `2h` | Access token lifetimes |
 | `HTTP_ADDRESS`, `OPS_ADDRESS` | | `:8080`, `:8081` | Listeners |
-| `ENABLE_PPROF`, `LOG_LEVEL`, `ENVIRONMENT` | | | Ops |
+| `ENABLE_PPROF`, `LOG_LEVEL` | | | Ops |
 
 ## Signing keys
 
@@ -295,7 +306,10 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing.pem
 and the signing keys and `DATABASE_URL` expected from a Secret. Probes are on
 the ops port (`/ping`, `/ready`, `/metrics`). Rendering fails when
 `replicaCount` is above 1 and `postgres.enabled` is false: the in-memory
-challenge store is per pod, so more replicas need the Postgres store.
+challenge store is per pod, so more replicas need the Postgres store. The
+in-memory store holds at most 50,000 challenges, sized to the chart's 256 MiB
+memory limit. dauth has no rate limit of its own, and the chart's ingress sets
+none.
 
 # Development
 

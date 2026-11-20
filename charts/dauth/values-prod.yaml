@@ -7,34 +7,17 @@ env:
   # --- sign-in surface (/signin) ---
   SIGNIN_ISSUER: https://dauth.dimo.zone/signin
   DIRECTORY_URL: http://did-directory-prod:8080
+  JWT_AUDIENCE: dimo
   # Must equal accounts' ACCOUNTS_PUBLIC_URL exactly.
   SIGNIN_ALLOWED_AUDIENCES: https://accounts.dimo.org
   # Browser origins allowed to call /signin (login and console).
   SIGNIN_CORS_ORIGINS: https://login.dimo.org,https://console.dimo.org
-  # --- sign-in surface (/siwe) ---
-  SIWE_ISSUER: https://dauth.dimo.zone/siwe
-  JWT_AUDIENCE: dimo
-  SIWE_STATEMENT: "Sign in to DIMO."
-  CHAIN_ID: "137"
   CHALLENGE_TTL: 5m
-  TOKEN_TTL: 1h
-  ALLOWABLE_TIME_SKEW: 5m
-  RATE_LIMIT_RPS: "50"
-  RATE_LIMIT_BURST: "100"
   # --- Exchange surface (/exchange) ---
   EXCHANGE_ISSUER: https://dauth.dimo.zone/exchange
-  TOKEN_EXPIRATION: 10m
-  GRPC_PORT: "8086"
+  # Not set yet, and dauth does not start without them: ORG_HOST_URL and
+  # DAUTH_DID (EXCHANGE_AUDIENCE defaults to dq).
   ENABLE_PPROF: "false"
-  USERS_API_GRPC_ADDRESS: users-api-prod:8086
-  CONTRACT_ADDRESS_SACD: "0x3c152B5d96769661008Ff404224d6530FCAC766d"
-  CONTRACT_ADDRESS_TEMPLATE: "0xbfc07085736426295f60baa15dc70743e98fe612"
-  CONTRACT_ADDRESS_MANUFACTURER: "0x3b07e2A2ABdd0A9B8F7878bdE6487c502164B9dd"
-  CONTRACT_ADDRESS_VEHICLE: "0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF"
-  IDENTITY_URL: http://identity-api-prod:8080/query
-  IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
-  IPFS_TIMEOUT: 30s
-  DIMO_REGISTRY_CHAIN_ID: "137"
 
 # Postgres-backed challenge store. When enabled, raise replicaCount above 1 and
 # provision the dauth/database_url secret (a postgres:// connection URL) in AWS
