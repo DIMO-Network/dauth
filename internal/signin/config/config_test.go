@@ -108,3 +108,29 @@ func TestLoad_MultipleAudiences(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"dimo", "https://din.dimo.zone"}, s.Audience)
 }
+
+func TestLoadRejectsBadTTLs(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"zero challenge":  {"CHALLENGE_TTL": "0s"},
+		"negative token":  {"TOKEN_TTL": "-1m"},
+		"zero approve":    {"APPROVE_TOKEN_TTL": "0s"},
+		"approve > token": {"TOKEN_TTL": "1m", "APPROVE_TOKEN_TTL": "2m"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setMinimalEnv(t)
+			for k, v := range env {
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoadReadsCORSOrigins(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("SIGNIN_CORS_ORIGINS", "https://login.dimo.org, https://console.dimo.org")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://login.dimo.org", "https://console.dimo.org"}, cfg.CORSOrigins)
+}

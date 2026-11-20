@@ -80,6 +80,13 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
+	exchangeKeys, err := keyset.Load(exchangeCfg.SigningKeys)
+	if err != nil {
+		return fmt.Errorf("failed to load exchange signing keys: %w", err)
+	}
+	if err := checkKeysDistinct(signinKeys, exchangeKeys); err != nil {
+		return err
+	}
 	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL, ApproveTTL: cfg.ApproveTTL})
 	signinHandler, err := buildSignin(ctx, cfg, relyingParties(cfg, exchangeCfg), signinKeys, issuer, log)
 	if err != nil {
@@ -98,7 +105,7 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	exchangeSurface, err := buildExchange(cfg, exchangeCfg, issuer, identity, log)
+	exchangeSurface, err := buildExchange(cfg, exchangeCfg, exchangeKeys, issuer, identity, log)
 	if err != nil {
 		return fmt.Errorf("building exchange surface: %w", err)
 	}
@@ -126,6 +133,7 @@ func run(log zerolog.Logger) error {
 		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).
 		Str("public_base_url", cfg.PublicBaseURL).Str("directory", cfg.DirectoryURL).
 		Str("signin_issuer", cfg.Issuer).Str("signin_active_kid", signinKeys.ActiveKID()).
+		Strs("signin_cors_origins", cfg.CORSOrigins).
 		Str("exchange_issuer", exchangeCfg.Issuer).Str("org_host", exchangeCfg.OrgHostURL).Str("dauth_did", exchangeCfg.DauthDID).
 		Msg("dauth started")
 	return group.Wait()
@@ -159,17 +167,30 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 	if err != nil {
 		return nil, err
 	}
-	return server.NewHandler(server.Config{Handlers: handlers, WellKnown: wellKnown}), nil
+	return server.NewHandler(server.Config{Handlers: handlers, WellKnown: wellKnown, CORSOrigins: cfg.CORSOrigins}), nil
 }
 
-// buildExchange constructs the exchange surface. dauth's own identity for the
-// org host is a sign-in token for DAUTH_DID, minted here and renewed a minute
-// before it expires.
-func buildExchange(cfg config.Config, ecfg exchange.Config, issuer *token.Issuer, identity *exchange.IdentityVerifier, log zerolog.Logger) (exchange.Surface, error) {
-	keys, err := keyset.Load(ecfg.SigningKeys)
-	if err != nil {
-		return exchange.Surface{}, fmt.Errorf("failed to load exchange signing keys: %w", err)
+// checkKeysDistinct fails when a sign-in signing key is also an /exchange
+// signing key. Separate keysets are the boundary between the two surfaces: a
+// token of one kind must never verify against the other surface's JWKS. Keys
+// are compared by RFC 7638 thumbprint.
+func checkKeysDistinct(signinKeys, exchangeKeys *keyset.KeySet) error {
+	used := map[string]bool{}
+	for _, kid := range exchangeKeys.KIDs() {
+		used[kid] = true
 	}
+	for _, kid := range signinKeys.KIDs() {
+		if used[kid] {
+			return fmt.Errorf("sign-in signing key %s is also an /exchange signing key; each surface needs its own keys", kid)
+		}
+	}
+	return nil
+}
+
+// buildExchange constructs the exchange surface from an already-loaded keyset.
+// dauth's own identity for the org host is a sign-in token for DAUTH_DID,
+// minted here and renewed a minute before it expires.
+func buildExchange(cfg config.Config, ecfg exchange.Config, keys *keyset.KeySet, issuer *token.Issuer, identity *exchange.IdentityVerifier, log zerolog.Logger) (exchange.Surface, error) {
 	wellKnown, err := oidc.NewWellKnown(oidc.Config{
 		Issuer:          ecfg.Issuer,
 		JWKSURI:         cfg.PublicBaseURL + "/exchange/keys",

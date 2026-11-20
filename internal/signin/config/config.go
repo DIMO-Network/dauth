@@ -28,7 +28,8 @@ type Config struct {
 	// PublicBaseURL is the externally reachable origin of the service (e.g.
 	// https://dauth.dimo.zone). It is the base for each surface's published
 	// jwks_uri (/signin/keys and /exchange/keys), for the DPoP htu of
-	// /exchange, and by convention for the iss claims. Required.
+	// /exchange and the /signin DPoP htu, and by convention for the iss claims.
+	// Required.
 	PublicBaseURL string
 
 	// DirectoryURL is the DID directory sign-in resolves DID documents from.
@@ -47,14 +48,19 @@ type Config struct {
 	// is permitted and every token carries the configured Audience.
 	AllowedAudiences []string
 
+	// CORSOrigins are the browser origins allowed to call /signin
+	// (SIGNIN_CORS_ORIGINS, comma-separated). Empty sends no CORS headers.
+	CORSOrigins []string
+
 	// Lifetimes.
 	ChallengeTTL time.Duration // CHALLENGE_TTL
 	TokenTTL     time.Duration // TOKEN_TTL: identity tokens without the approve scope
 	ApproveTTL   time.Duration // APPROVE_TOKEN_TTL: tokens carrying approve, kept short
 
-	// Signing keys, in priority order: the first is the active signer; the
-	// rest are retiring keys kept in the JWKS so their tokens still verify
-	// during a rotation overlap window. Each is a PEM-encoded RSA private key.
+	// Signing keys (SIGNIN_SIGNING_KEY_n), in priority order: the first is the
+	// active signer; the rest are retiring keys kept in the JWKS so their tokens
+	// still verify during a rotation overlap window. Each is a PEM-encoded RSA
+	// private key.
 	SigningKeys []string
 
 	// DatabaseURL is the pgx connection URL for the Postgres-backed challenge
@@ -83,6 +89,7 @@ func Load() (Config, error) {
 		Domain:           os.Getenv("SIGNIN_DOMAIN"),
 		Audience:         envx.List(os.Getenv("JWT_AUDIENCE")),
 		AllowedAudiences: envx.List(os.Getenv("SIGNIN_ALLOWED_AUDIENCES")),
+		CORSOrigins:      envx.List(os.Getenv("SIGNIN_CORS_ORIGINS")),
 	}
 
 	if s.Issuer == "" {
@@ -130,6 +137,17 @@ func Load() (Config, error) {
 	}
 	if s.ApproveTTL, err = envx.Duration("APPROVE_TOKEN_TTL", 5*time.Minute); err != nil {
 		return s, err
+	}
+
+	for name, d := range map[string]time.Duration{
+		"CHALLENGE_TTL": s.ChallengeTTL, "TOKEN_TTL": s.TokenTTL, "APPROVE_TOKEN_TTL": s.ApproveTTL,
+	} {
+		if d <= 0 {
+			return s, fmt.Errorf("%s must be greater than zero, got %s", name, d)
+		}
+	}
+	if s.ApproveTTL > s.TokenTTL {
+		return s, fmt.Errorf("APPROVE_TOKEN_TTL (%s) must not exceed TOKEN_TTL (%s)", s.ApproveTTL, s.TokenTTL)
 	}
 
 	// Signing keys: SIGNIN_SIGNING_KEY_1, SIGNIN_SIGNING_KEY_2, ... in order. The
