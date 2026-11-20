@@ -33,6 +33,13 @@ const maxDPoPBytes = 4096
 // jktPattern is a SHA-256 thumbprint in base64url without padding.
 var jktPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
+// ProofVerifier checks a DPoP proof and returns the thumbprint of the key that
+// made it. did-directory's *dpop.Verifier is one; it records each accepted
+// proof's jti, which is why /token only calls it for a live challenge.
+type ProofVerifier interface {
+	Verify(proof, method, requestURL, accessToken string) (string, error)
+}
+
 // Handlers serves the sign-in endpoints.
 type Handlers struct {
 	Store    nonce.Store
@@ -40,7 +47,7 @@ type Handlers struct {
 	Issuer   *token.Issuer
 	// DPoP checks the proof /token takes from the key the token will be
 	// bound to, and TokenURL is the public URL of /token that proof names.
-	DPoP     *dpop.Verifier
+	DPoP     ProofVerifier
 	TokenURL string
 
 	Domain       string // shown in the challenge text
@@ -158,11 +165,13 @@ func (h *Handlers) Challenge() http.Handler {
 		msg := challengeText(h.Domain, req.DID, aud, scopes, req.JKT, id, now, expiresAt)
 
 		// The store is keyed by the nonce, which the client returns to /token.
+		// It keeps the resolved audience, so the token's aud is exactly what
+		// the challenge text names even if the default changes meanwhile.
 		if err := h.Store.Put(r.Context(), id, nonce.Challenge{
 			Message:   msg,
 			DID:       req.DID,
 			ExpiresAt: expiresAt,
-			Audience:  req.Audience,
+			Audience:  aud,
 			Scopes:    scopes,
 			JKT:       req.JKT,
 		}); err != nil {
@@ -215,12 +224,8 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 
-		// Look the challenge up by nonce and consume it. Single-use: a replayed
-		// nonce, an expired challenge, or an unknown nonce all surface
-		// identically as invalid_grant.
-		// The proof shows the caller holds the key the challenge named. It is
-		// checked before the nonce is consumed, so a request without one
-		// does not burn the challenge.
+		// The proof shows the caller holds the key the challenge named. A
+		// request without one is refused before anything is looked up.
 		proof := r.Header.Get(dpop.HeaderName)
 		if proof == "" {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "a DPoP proof from the key the challenge names is required")
@@ -230,19 +235,32 @@ func (h *Handlers) Token() http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "DPoP proof is too large")
 			return
 		}
+
+		// Peek first, so a request for an unknown, used or expired nonce
+		// stops here: its proof is never verified, so its jti is never
+		// recorded. All three surface identically as invalid_grant.
+		ch, err := h.Store.Peek(r.Context(), req.Nonce)
+		if err != nil {
+			h.challengeLookupFailed(w, err)
+			return
+		}
 		jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.TokenURL, "")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
 			return
 		}
-
-		ch, err := h.Store.Consume(r.Context(), req.Nonce)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid_grant", "challenge not found, already used, or expired")
-			return
-		}
+		// A proof from another key spends nothing: whoever has only the nonce
+		// cannot burn the challenge.
 		if jkt != ch.JKT {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "the DPoP proof is not from the key the challenge names")
+			return
+		}
+		// Consume only as the key the challenge names. Of concurrent requests
+		// for one nonce exactly one gets here with the challenge; the rest
+		// get invalid_grant.
+		ch, err = h.Store.Consume(r.Context(), req.Nonce, jkt)
+		if err != nil {
+			h.challengeLookupFailed(w, err)
 			return
 		}
 
@@ -282,6 +300,17 @@ func (h *Handlers) Token() http.Handler {
 			Scope:     identity.FormatScope(ch.Scopes),
 		})
 	})
+}
+
+// challengeLookupFailed answers a Peek or Consume error: a missing challenge is
+// invalid_grant, and a store that could not answer is a retryable 503.
+func (h *Handlers) challengeLookupFailed(w http.ResponseWriter, err error) {
+	if errors.Is(err, nonce.ErrNotFound) {
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "challenge not found, already used, or expired")
+		return
+	}
+	h.Log.Warn().Err(err).Msg("reading challenge")
+	writeError(w, http.StatusServiceUnavailable, "server_error", "challenge store unavailable, retry shortly")
 }
 
 // audienceAllowed reports whether a requested audience may be honored. An empty

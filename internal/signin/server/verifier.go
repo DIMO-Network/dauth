@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"time"
 
@@ -33,15 +34,15 @@ type VerificationMethod struct {
 // Directory answers which keys a DID currently publishes.
 type Directory interface {
 	// VerificationMethods resolves did and returns its verification methods.
-	// It returns ErrDIDNotFound for a DID the directory does not hold, wraps
-	// ErrDIDUnusable for one it refuses to serve (gone, or a 4xx), and wraps
-	// ErrDirectory for any other failure.
+	// It returns ErrDIDNotFound for a DID the directory does not hold (404),
+	// wraps ErrDIDUnusable for one it will never serve (400, 410, 422), and
+	// wraps ErrDirectory for any other failure, which a retry may get past.
 	VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error)
 }
 
-// ErrDIDUnusable means the directory holds the DID but will not serve a
-// document for it (it was deactivated, or the directory refused the request as
-// malformed). Retrying cannot help, so the sign-in is refused.
+// ErrDIDUnusable means the directory will not serve a document for the DID:
+// it was deactivated (410), or the directory refused the request as malformed
+// (400, 422). Retrying cannot help, so the sign-in is refused.
 var ErrDIDUnusable = errors.New("DID not usable")
 
 // resolveTimeout bounds one directory resolve.
@@ -58,13 +59,16 @@ func (d *DirectoryClient) VerificationMethods(ctx context.Context, did string) (
 	defer cancel()
 	doc, err := d.Client.Resolve(ctx, did)
 	if err != nil {
+		// Only answers that say the DID itself is the problem are terminal.
+		// Everything else (a timeout, 408, 429, any other 4xx, a 5xx) is the
+		// directory failing to answer, which a retry may get past.
 		var se *client.StatusError
 		switch {
 		case errors.Is(err, client.ErrNotFound):
 			return nil, ErrDIDNotFound
 		case errors.Is(err, client.ErrGone):
 			return nil, fmt.Errorf("%w: %v", ErrDIDUnusable, err)
-		case errors.As(err, &se) && se.Status >= 400 && se.Status < 500:
+		case errors.As(err, &se) && (se.Status == http.StatusBadRequest || se.Status == http.StatusUnprocessableEntity):
 			return nil, fmt.Errorf("%w: directory answered %d", ErrDIDUnusable, se.Status)
 		}
 		return nil, fmt.Errorf("%w: %v", ErrDirectory, err)

@@ -1,9 +1,11 @@
 // Package nonce stores the short-lived, single-use challenges issued during
 // sign-in. dauth holds the challenge text here, keyed by its nonce, so the
 // token endpoint can find the outstanding challenge from the nonce the client
-// returns, verify the signature against the stored copy, and consume the entry
-// atomically, giving true single-use replay protection. The store is the only
-// server-side state in the login flow; the issued JWTs remain stateless.
+// returns, check the request against it without spending it, consume the entry
+// atomically once the request holds the key it names, and verify the signature
+// against the stored copy, giving true single-use replay protection. The store
+// is the only server-side state in the login flow; the issued JWTs remain
+// stateless.
 package nonce
 
 import (
@@ -23,9 +25,10 @@ type Challenge struct {
 	Message   string    // the challenge text the DID's key signs
 	DID       string    // DID that must sign Message
 	ExpiresAt time.Time // absolute expiry
-	// Audience is the `aud` to stamp on the issued token, bound here at
-	// challenge time so it cannot be swapped at /token time. Empty means the
-	// issuer's configured default audience.
+	// Audience is the `aud` to stamp on the issued token: the resolved value
+	// (the requested audience, or the issuer's default when none was asked
+	// for), bound here at challenge time so the token carries exactly the
+	// audience the challenge text names and cannot be swapped at /token time.
 	Audience []string
 	// Scopes and JKT are the token's scopes and the thumbprint of the DPoP
 	// key it will be bound to, fixed at challenge time like Audience; the
@@ -34,16 +37,22 @@ type Challenge struct {
 	JKT    string
 }
 
-// Store records and atomically consumes challenges, keyed by nonce. The two
+// Store records and atomically consumes challenges, keyed by nonce. The
 // methods take a context so a database-backed store (see Postgres) can bind its
 // work to the request's lifetime; the in-memory store ignores it.
 type Store interface {
 	// Put records ch under the given nonce.
 	Put(ctx context.Context, nonce string, ch Challenge) error
-	// Consume removes and returns the challenge for nonce. It returns
-	// ErrNotFound if absent or expired. Consuming is single-use: a second
-	// call for the same nonce returns ErrNotFound.
-	Consume(ctx context.Context, nonce string) (Challenge, error)
+	// Peek returns the challenge for nonce without consuming it, so /token
+	// can check a request against it before anything is spent or stored. It
+	// returns ErrNotFound if absent or expired.
+	Peek(ctx context.Context, nonce string) (Challenge, error)
+	// Consume removes and returns the challenge for nonce, but only when it is
+	// bound to the DPoP key thumbprint jkt; a challenge bound to another key
+	// stays in place. It returns ErrNotFound if the challenge is absent,
+	// expired, already consumed or bound to another key. Consuming is
+	// single-use: of any number of calls for one nonce, at most one succeeds.
+	Consume(ctx context.Context, nonce, jkt string) (Challenge, error)
 }
 
 // New returns a fresh, cryptographically random nonce (32 bytes, hex-encoded).

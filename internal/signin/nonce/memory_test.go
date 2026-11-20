@@ -2,6 +2,7 @@ package nonce
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,11 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testJKT is the DPoP key thumbprint test challenges are bound to.
+const testJKT = "k"
+
 func testChallenge(expiresAt time.Time) Challenge {
 	return Challenge{
 		Message:   "msg",
 		DID:       "did:dimo:0x01",
 		ExpiresAt: expiresAt,
+		JKT:       testJKT,
 	}
 }
 
@@ -23,7 +28,7 @@ func TestPutConsume(t *testing.T) {
 	ch := testChallenge(time.Now().Add(time.Minute))
 	require.NoError(t, m.Put(ctx, "nonce-1", ch))
 
-	got, err := m.Consume(ctx, "nonce-1")
+	got, err := m.Consume(ctx, "nonce-1", testJKT)
 	require.NoError(t, err)
 	assert.Equal(t, ch.DID, got.DID)
 	assert.Equal(t, ch.Message, got.Message)
@@ -34,17 +39,17 @@ func TestConsume_SingleUse(t *testing.T) {
 	m := NewMemory(ctx, 1000)
 	require.NoError(t, m.Put(ctx, "n", testChallenge(time.Now().Add(time.Minute))))
 
-	_, err := m.Consume(ctx, "n")
+	_, err := m.Consume(ctx, "n", testJKT)
 	require.NoError(t, err)
 
-	_, err = m.Consume(ctx, "n")
+	_, err = m.Consume(ctx, "n", testJKT)
 	assert.ErrorIs(t, err, ErrNotFound, "a nonce must not be consumable twice")
 }
 
 func TestConsume_Unknown(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory(ctx, 1000)
-	_, err := m.Consume(ctx, "never-issued")
+	_, err := m.Consume(ctx, "never-issued", testJKT)
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -56,7 +61,7 @@ func TestConsume_Expired(t *testing.T) {
 
 	// Advance the clock past expiry.
 	m.now = func() time.Time { return now.Add(2 * time.Minute) }
-	_, err := m.Consume(ctx, "n")
+	_, err := m.Consume(ctx, "n", testJKT)
 	assert.ErrorIs(t, err, ErrNotFound, "an expired challenge must not be consumable")
 }
 
@@ -94,6 +99,76 @@ func TestJanitor_EvictsExpired(t *testing.T) {
 		m.sweepLocked(s)
 		s.mu.Unlock()
 	}
-	_, err := m.Consume(ctx, "n")
+	_, err := m.Consume(ctx, "n", testJKT)
 	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestPeek_DoesNotConsume(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory(ctx, 1000)
+	ch := testChallenge(time.Now().Add(time.Minute))
+	require.NoError(t, m.Put(ctx, "n", ch))
+
+	for range 2 {
+		got, err := m.Peek(ctx, "n")
+		require.NoError(t, err)
+		assert.Equal(t, ch.Message, got.Message)
+	}
+	_, err := m.Consume(ctx, "n", testJKT)
+	require.NoError(t, err, "peeking must leave the challenge consumable")
+	_, err = m.Peek(ctx, "n")
+	assert.ErrorIs(t, err, ErrNotFound, "a consumed challenge must not be peekable")
+}
+
+func TestPeek_UnknownAndExpired(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory(ctx, 1000)
+	_, err := m.Peek(ctx, "never-issued")
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	now := time.Now()
+	require.NoError(t, m.Put(ctx, "n", testChallenge(now.Add(time.Minute))))
+	m.now = func() time.Time { return now.Add(2 * time.Minute) }
+	_, err = m.Peek(ctx, "n")
+	assert.ErrorIs(t, err, ErrNotFound, "an expired challenge must not be peekable")
+}
+
+func TestConsume_WrongKeyLeavesChallenge(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory(ctx, 1000)
+	require.NoError(t, m.Put(ctx, "n", testChallenge(time.Now().Add(time.Minute))))
+
+	_, err := m.Consume(ctx, "n", "another-key")
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = m.Consume(ctx, "n", testJKT)
+	assert.NoError(t, err, "a consume naming another key must not spend the challenge")
+}
+
+func TestConsume_Concurrent(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory(ctx, 1000)
+	require.NoError(t, m.Put(ctx, "n", testChallenge(time.Now().Add(time.Minute))))
+
+	const racers = 16
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	start := make(chan struct{})
+	for range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := m.Consume(ctx, "n", testJKT); err == nil {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			} else {
+				assert.ErrorIs(t, err, ErrNotFound)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	assert.Equal(t, 1, wins, "exactly one consumer must win the nonce")
 }

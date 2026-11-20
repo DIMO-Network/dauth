@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS nonce_challenges (
     message    TEXT        NOT NULL,       -- the challenge text the DID's key signs
     did        TEXT        NOT NULL,       -- DID expected to sign
     expires_at TIMESTAMPTZ NOT NULL,       -- absolute expiry; rows past this are swept
-    audience   TEXT[],                     -- requested `aud` bound at challenge time; NULL = default
+    audience   TEXT[],                     -- resolved `aud` (default applied), bound at challenge time
     scopes     TEXT[]      NOT NULL,       -- the token's scopes, bound at challenge time
     jkt        TEXT        NOT NULL        -- thumbprint of the DPoP key the token is bound to
 );

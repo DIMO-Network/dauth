@@ -18,14 +18,15 @@ var schema string
 // Postgres is a Store backed by a single nonce_challenges table. Unlike the
 // in-memory store it is shared across replicas, so a challenge issued by one
 // dauth pod is consumable on any other — which is what lets dauth run more than
-// one replica. Single-use consumption is a DELETE ... RETURNING, atomic even
-// under concurrent /signin/token calls racing on the same nonce: exactly one
-// caller gets the row, every other gets ErrNotFound.
+// one replica. Single-use consumption is a DELETE ... WHERE nonce AND jkt
+// RETURNING, atomic even under concurrent /signin/token calls racing on the
+// same nonce: exactly one caller gets the row, every other gets ErrNotFound,
+// and a caller naming another key deletes nothing.
 //
 // There is no hard capacity cap here (the in-memory store's ErrFull guards a
-// process's heap). A flood of unredeemed challenges is bounded instead by the
-// HTTP rate limiter in front of /signin/challenge and by the janitor sweeping
-// expired rows; each row is tiny and short-lived.
+// process's heap). A flood of unredeemed challenges is bounded only by the
+// janitor sweeping expired rows and by any rate limit put in front of
+// /signin/challenge (none today); each row is small and short-lived.
 type Postgres struct {
 	db  *pgxpool.Pool
 	now func() time.Time
@@ -58,40 +59,48 @@ func (p *Postgres) Put(ctx context.Context, id string, ch Challenge) error {
 	return nil
 }
 
-// Consume deletes the row for id and returns it, in one atomic statement. As in
-// the in-memory store, an expired row is still deleted but reported as
-// ErrNotFound (delete-then-check), so the three failure modes — unknown,
-// already-used, expired — are indistinguishable to the caller.
-func (p *Postgres) Consume(ctx context.Context, id string) (Challenge, error) {
-	var (
-		msg     string
-		did     string
-		expires time.Time
-		aud     []string
-		scopes  []string
-		jkt     string
-	)
-	err := p.db.QueryRow(ctx,
-		`DELETE FROM nonce_challenges WHERE nonce = $1
-		 RETURNING message, did, expires_at, audience, scopes, jkt`, id).
-		Scan(&msg, &did, &expires, &aud, &scopes, &jkt)
+// Peek reads the row for id without deleting it. An expired row reads as
+// ErrNotFound and is left for Consume or the janitor.
+func (p *Postgres) Peek(ctx context.Context, id string) (Challenge, error) {
+	ch, err := p.scan(p.db.QueryRow(ctx,
+		`SELECT message, did, expires_at, audience, scopes, jkt
+		 FROM nonce_challenges WHERE nonce = $1`, id))
+	if err != nil {
+		return Challenge{}, fmt.Errorf("reading challenge: %w", err)
+	}
+	return ch, nil
+}
+
+// Consume deletes the row for id, only if it is bound to jkt, and returns it,
+// in one atomic statement. As in the in-memory store, an expired row is still
+// deleted but reported as ErrNotFound (delete-then-check), so the failure modes
+// — unknown, already-used, expired, another key — are indistinguishable to the
+// caller.
+func (p *Postgres) Consume(ctx context.Context, id, jkt string) (Challenge, error) {
+	ch, err := p.scan(p.db.QueryRow(ctx,
+		`DELETE FROM nonce_challenges WHERE nonce = $1 AND jkt = $2
+		 RETURNING message, did, expires_at, audience, scopes, jkt`, id, jkt))
+	if err != nil {
+		return Challenge{}, fmt.Errorf("consuming challenge: %w", err)
+	}
+	return ch, nil
+}
+
+// scan reads one challenge row. No row, or a row past its expiry, is
+// ErrNotFound.
+func (p *Postgres) scan(row pgx.Row) (Challenge, error) {
+	var ch Challenge
+	err := row.Scan(&ch.Message, &ch.DID, &ch.ExpiresAt, &ch.Audience, &ch.Scopes, &ch.JKT)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Challenge{}, ErrNotFound
 	case err != nil:
-		return Challenge{}, fmt.Errorf("consuming challenge: %w", err)
+		return Challenge{}, err
 	}
-	if p.now().After(expires) {
+	if p.now().After(ch.ExpiresAt) {
 		return Challenge{}, ErrNotFound
 	}
-	return Challenge{
-		Message:   msg,
-		DID:       did,
-		ExpiresAt: expires,
-		Audience:  aud,
-		Scopes:    scopes,
-		JKT:       jkt,
-	}, nil
+	return ch, nil
 }
 
 // janitor periodically deletes expired rows. Consume already discards expired

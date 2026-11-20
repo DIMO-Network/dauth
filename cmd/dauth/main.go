@@ -149,7 +149,7 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 
 	handlers := &server.Handlers{
 		Store:            store,
-		Verifier:         &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(cfg.DirectoryURL)}},
+		Verifier:         newDIDVerifier(cfg.DirectoryURL),
 		Issuer:           issuer,
 		Domain:           cfg.Domain,
 		ChallengeTTL:     cfg.ChallengeTTL,
@@ -236,16 +236,31 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, keys *keyset.KeySet,
 			Key:      selfKey,
 			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
 		},
-		Assertions: &exchange.AssertionVerifier{
-			Keys:          &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(cfg.DirectoryURL)}},
-			Audience:      exchangeURL,
-			IsUnavailable: func(err error) bool { return errors.Is(err, server.ErrDirectory) },
-		},
+		Assertions:  newAssertionVerifier(newDIDVerifier(cfg.DirectoryURL), exchangeURL),
 		DPoP:        dpop.NewVerifier(),
 		ExchangeURL: exchangeURL,
 		Log:         log,
 	}
 	return exchange.NewSurface(h, identity, wellKnown), nil
+}
+
+// newDIDVerifier checks signatures against the keys DID documents in the
+// directory at directoryURL list. Both surfaces use one: /signin for the
+// member's key, /exchange for an app's client assertion.
+func newDIDVerifier(directoryURL string) *server.Verifier {
+	return &server.Verifier{Directory: &server.DirectoryClient{Client: client.New(directoryURL)}}
+}
+
+// newAssertionVerifier checks /exchange client assertions addressed to
+// audience. Only ErrDirectory (no answer, a timeout, 408, 429, a 5xx) makes
+// the exchange answer 503 and the client retry; a DID the directory does not
+// hold (404) or will never serve (400, 410, 422) is an invalid client.
+func newAssertionVerifier(keys exchange.KeyVerifier, audience string) *exchange.AssertionVerifier {
+	return &exchange.AssertionVerifier{
+		Keys:          keys,
+		Audience:      audience,
+		IsUnavailable: func(err error) bool { return errors.Is(err, server.ErrDirectory) },
+	}
 }
 
 // relyingParties is the audiences a sign-in may ask for: those configured,

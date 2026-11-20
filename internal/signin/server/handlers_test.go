@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -365,8 +366,9 @@ func TestTokenRejectsOversizeDPoP(t *testing.T) {
 	assert.Equal(t, "invalid_dpop_proof", body["error"])
 }
 
-// The real DirectoryClient maps the directory's status codes: 410 and 4xx
-// refuse the sign-in, 5xx asks the caller to retry.
+// The real DirectoryClient maps the directory's status codes: 404, 400, 410
+// and 422 refuse the sign-in; 408, 429, other 4xx and 5xx ask the caller to
+// retry.
 func TestDirectoryStatusMapping(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -374,8 +376,14 @@ func TestDirectoryStatusMapping(t *testing.T) {
 		want      int
 		wantErr   string
 	}{
+		{"not found", http.StatusNotFound, http.StatusUnauthorized, "invalid_grant"},
 		{"gone", http.StatusGone, http.StatusUnauthorized, "invalid_grant"},
 		{"bad request", http.StatusBadRequest, http.StatusUnauthorized, "invalid_grant"},
+		{"unprocessable", http.StatusUnprocessableEntity, http.StatusUnauthorized, "invalid_grant"},
+		{"request timeout", http.StatusRequestTimeout, http.StatusServiceUnavailable, "server_error"},
+		{"too many requests", http.StatusTooManyRequests, http.StatusServiceUnavailable, "server_error"},
+		{"forbidden", http.StatusForbidden, http.StatusServiceUnavailable, "server_error"},
+		{"internal error", http.StatusInternalServerError, http.StatusServiceUnavailable, "server_error"},
 		{"unavailable", http.StatusServiceUnavailable, http.StatusServiceUnavailable, "server_error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -514,4 +522,127 @@ func TestTokenUsesWalletFragment(t *testing.T) {
 	msg, n = e.challenge(t, did)
 	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, other, msg)})
 	assert.Equal(t, http.StatusOK, status, body)
+}
+
+// countingDPoP counts the proofs it is asked to verify.
+type countingDPoP struct {
+	inner ProofVerifier
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingDPoP) Verify(proof, method, requestURL, accessToken string) (string, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.inner.Verify(proof, method, requestURL, accessToken)
+}
+
+func (c *countingDPoP) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// An unknown nonce is refused before the proof is verified, so its jti is
+// never recorded: the same proof still works for a real challenge.
+func TestTokenUnknownNonceSkipsProofVerification(t *testing.T) {
+	e := newTestEnv(t)
+	counter := &countingDPoP{inner: e.handlers.DPoP}
+	e.handlers.DPoP = counter
+
+	proof, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+	require.NoError(t, err)
+	status, body := e.postWith(t, "/token", proof, map[string]any{"nonce": "never-issued", "signature": "x"})
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_grant", body["error"])
+	assert.Zero(t, counter.count(), "an unknown nonce must not reach DPoP verification")
+
+	msg, n := e.challenge(t, testDID)
+	status, body = e.postWith(t, "/token", proof, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusOK, status, body, "the proof's jti must not have been recorded")
+	assert.Equal(t, 1, counter.count())
+}
+
+// A proof from another key is refused without spending the challenge, so
+// whoever has only the nonce cannot burn it.
+func TestTokenWrongKeyLeavesChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	other, err := dpop.GenerateKey()
+	require.NoError(t, err)
+
+	status, body := e.redeem(t, other, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, "invalid_dpop_proof", body["error"])
+
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusOK, status, body, "the right key must still redeem the challenge")
+}
+
+// Concurrent redemptions of one challenge, each with its own fresh proof from
+// the right key: exactly one gets a token.
+func TestTokenConcurrentRedeem(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	sig := sign(t, e.priv, msg)
+
+	const racers = 8
+	proofs := make([]string, racers)
+	for i := range proofs {
+		p, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+		require.NoError(t, err)
+		proofs[i] = p
+	}
+	statuses := make(chan int, racers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, proof := range proofs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			status, _ := e.postWith(t, "/token", proof, map[string]any{"nonce": n, "signature": sig})
+			statuses <- status
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+
+	var ok, refused int
+	for status := range statuses {
+		switch status {
+		case http.StatusOK:
+			ok++
+		case http.StatusUnauthorized:
+			refused++
+		default:
+			t.Errorf("unexpected status %d", status)
+		}
+	}
+	assert.Equal(t, 1, ok, "exactly one redemption must win")
+	assert.Equal(t, racers-1, refused)
+}
+
+// The challenge stores the resolved audience, so the token carries exactly
+// the aud the challenge text named even if the default changes before /token.
+func TestChallengeStoresResolvedAudience(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	assert.Contains(t, msg, "\nFor: dimo\n")
+
+	stored, err := e.handlers.Store.Peek(context.Background(), n)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dimo"}, stored.Audience)
+
+	// A new default between challenge and token must not change the aud.
+	e.handlers.Issuer = token.NewIssuer(token.Config{Keys: e.keys, Issuer: testIssuer, Audience: []string{"changed"}, TTL: 10 * time.Minute, ApproveTTL: 2 * time.Minute})
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	require.Equal(t, http.StatusOK, status, body)
+	var claims token.Claims
+	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(body["token"].(string), &claims, func(*jwt.Token) (any, error) { return e.pub, nil })
+	require.NoError(t, err)
+	assert.Equal(t, jwt.ClaimStrings{"dimo"}, claims.Audience)
 }

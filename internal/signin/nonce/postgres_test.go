@@ -40,7 +40,7 @@ func TestPostgres_PutConsume(t *testing.T) {
 	p := newTestPostgres(t)
 
 	ch := Challenge{
-		Message:   "canonical siwe message",
+		Message:   "canonical challenge text",
 		DID:       "did:dimo:0xc0ffee254729296a45a3885639AC7E10F9d54979",
 		ExpiresAt: time.Now().Add(time.Minute).UTC().Truncate(time.Microsecond),
 		Audience:  []string{"step-ca"},
@@ -49,7 +49,7 @@ func TestPostgres_PutConsume(t *testing.T) {
 	}
 	require.NoError(t, p.Put(ctx, "nonce-1", ch))
 
-	got, err := p.Consume(ctx, "nonce-1")
+	got, err := p.Consume(ctx, "nonce-1", ch.JKT)
 	require.NoError(t, err)
 	assert.Equal(t, ch.DID, got.DID)
 	assert.Equal(t, ch.Message, got.Message)
@@ -66,16 +66,16 @@ func TestPostgres_SingleUse(t *testing.T) {
 		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 
-	_, err := p.Consume(ctx, "n")
+	_, err := p.Consume(ctx, "n", "k")
 	require.NoError(t, err)
 
-	_, err = p.Consume(ctx, "n")
+	_, err = p.Consume(ctx, "n", "k")
 	assert.ErrorIs(t, err, ErrNotFound, "a nonce must not be consumable twice")
 }
 
 func TestPostgres_Unknown(t *testing.T) {
 	p := newTestPostgres(t)
-	_, err := p.Consume(context.Background(), "never-issued")
+	_, err := p.Consume(context.Background(), "never-issued", "k")
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -90,7 +90,7 @@ func TestPostgres_Expired(t *testing.T) {
 	// Advance the store's clock past expiry; the row is still deleted but
 	// reported as missing.
 	p.now = func() time.Time { return now.Add(2 * time.Minute) }
-	_, err := p.Consume(ctx, "n")
+	_, err := p.Consume(ctx, "n", "k")
 	assert.ErrorIs(t, err, ErrNotFound, "an expired challenge must not be consumable")
 }
 
@@ -109,7 +109,7 @@ func TestPostgres_ConcurrentConsume(t *testing.T) {
 	for i := 0; i < racers; i++ {
 		go func() {
 			<-start
-			_, err := p.Consume(ctx, "n")
+			_, err := p.Consume(ctx, "n", "k")
 			results <- err
 		}()
 	}
@@ -124,4 +124,47 @@ func TestPostgres_ConcurrentConsume(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, wins, "exactly one consumer must win the nonce")
+}
+
+func TestPostgres_Peek(t *testing.T) {
+	ctx := context.Background()
+	p := newTestPostgres(t)
+	now := time.Now()
+	ch := Challenge{Scopes: []string{"read"}, JKT: "k", Audience: []string{"dimo"},
+		Message: "m", DID: "did:dimo:0x01", ExpiresAt: now.Add(time.Minute).UTC().Truncate(time.Microsecond),
+	}
+	require.NoError(t, p.Put(ctx, "n", ch))
+
+	for range 2 {
+		got, err := p.Peek(ctx, "n")
+		require.NoError(t, err)
+		assert.Equal(t, ch.Message, got.Message)
+		assert.Equal(t, ch.Audience, got.Audience)
+		assert.Equal(t, ch.JKT, got.JKT)
+	}
+	_, err := p.Peek(ctx, "never-issued")
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	p.now = func() time.Time { return now.Add(2 * time.Minute) }
+	_, err = p.Peek(ctx, "n")
+	assert.ErrorIs(t, err, ErrNotFound, "an expired challenge must not be peekable")
+	p.now = time.Now
+
+	_, err = p.Consume(ctx, "n", "k")
+	require.NoError(t, err, "peeking must leave the challenge consumable")
+	_, err = p.Peek(ctx, "n")
+	assert.ErrorIs(t, err, ErrNotFound, "a consumed challenge must not be peekable")
+}
+
+func TestPostgres_WrongKeyLeavesChallenge(t *testing.T) {
+	ctx := context.Background()
+	p := newTestPostgres(t)
+	require.NoError(t, p.Put(ctx, "n", Challenge{Scopes: []string{"read"}, JKT: "k",
+		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+
+	_, err := p.Consume(ctx, "n", "another-key")
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = p.Consume(ctx, "n", "k")
+	assert.NoError(t, err, "a consume naming another key must not spend the challenge")
 }
