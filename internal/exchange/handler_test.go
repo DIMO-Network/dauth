@@ -234,6 +234,13 @@ func (e *env) issue(t *testing.T, req token.Request) string {
 // when proof is false).
 func (e *env) exchange(t *testing.T, identity string, proof bool, body any) (int, map[string]any) {
 	t.Helper()
+	resp, out := e.exchangeResponse(t, identity, proof, body)
+	return resp.StatusCode, out
+}
+
+// exchangeResponse is exchange returning the whole response, for its headers.
+func (e *env) exchangeResponse(t *testing.T, identity string, proof bool, body any) (*http.Response, map[string]any) {
+	t.Helper()
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
 	req, err := http.NewRequest(http.MethodPost, e.ts.URL+"/exchange", bytes.NewReader(raw))
@@ -254,7 +261,7 @@ func (e *env) exchange(t *testing.T, identity string, proof bool, body any) (int
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(data, &out), string(data))
-	return resp.StatusCode, out
+	return resp, out
 }
 
 func (e *env) parse(t *testing.T, signed string) *tokenclaims.Token {
@@ -599,8 +606,9 @@ func TestExchangeClientAssertion(t *testing.T) {
 		e.keys.down = true
 		e.keys.mu.Unlock()
 		defer func() { e.keys.mu.Lock(); e.keys.down = false; e.keys.mu.Unlock() }()
-		status, resp := e.exchange(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
-		assert.Equal(t, http.StatusServiceUnavailable, status, resp)
+		resp, body := e.exchangeResponse(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, body)
+		assert.Equal(t, "1", resp.Header.Get("Retry-After"), "the app's DID could not be resolved: retry shortly")
 	})
 
 	t.Run("the host refuses a client the allowlist does not name", func(t *testing.T) {

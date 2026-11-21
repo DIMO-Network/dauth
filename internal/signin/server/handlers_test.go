@@ -785,6 +785,80 @@ func TestTokenUncheckableProofIs503(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status, out)
 }
 
+// downStore is a challenge store whose Put or Peek fails with err when set.
+type downStore struct {
+	nonce.Store
+	putErr, peekErr error
+}
+
+func (s *downStore) Put(ctx context.Context, n string, ch nonce.Challenge) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	return s.Store.Put(ctx, n, ch)
+}
+
+func (s *downStore) Peek(ctx context.Context, n string) (nonce.Challenge, error) {
+	if s.peekErr != nil {
+		return nonce.Challenge{}, s.peekErr
+	}
+	return s.Store.Peek(ctx, n)
+}
+
+// redeemResponse posts body to /token with a fresh proof from the holder and
+// returns the response, for its headers.
+func (e *testEnv) redeemResponse(t *testing.T, body any) *http.Response {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	proof, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, e.ts.URL+"/token", bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(dpop.HeaderName, proof)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	return resp
+}
+
+// Every 503 /signin answers is retryable and says when: Retry-After: 1.
+func TestUnavailableSaysRetryAfter(t *testing.T) {
+	t.Run("challenge store down at /challenge", func(t *testing.T) {
+		e := newTestEnv(t)
+		e.handlers.Store = &downStore{Store: e.handlers.Store, putErr: errors.New("connection refused")}
+		status, header := postTo(t, e.ts.URL+"/challenge", map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()})
+		assert.Equal(t, http.StatusServiceUnavailable, status)
+		assert.Equal(t, "1", header.Get("Retry-After"))
+	})
+	t.Run("challenge store down at /token", func(t *testing.T) {
+		e := newTestEnv(t)
+		msg, n := e.challenge(t, testDID)
+		e.handlers.Store = &downStore{Store: e.handlers.Store, peekErr: errors.New("connection refused")}
+		resp := e.redeemResponse(t, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+	})
+	// The real directory client against a directory that answers 500.
+	t.Run("directory down", func(t *testing.T) {
+		dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "down", http.StatusInternalServerError)
+		}))
+		t.Cleanup(dir.Close)
+		e := newTestEnv(t)
+		e.handlers.Verifier = &Verifier{Directory: &DirectoryClient{Client: client.New(dir.URL)}}
+		msg, n := e.challenge(t, testDID)
+		resp := e.redeemResponse(t, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+		_, err := e.handlers.Store.Peek(context.Background(), n)
+		require.NoError(t, err, "a directory outage must not spend the challenge")
+	})
+	// TestTokenUncheckableProofIs503 covers the DPoP proof that could not be
+	// checked.
+}
+
 // Concurrent redemptions of one challenge, each with its own fresh proof from
 // the right key: exactly one gets a token.
 func TestTokenConcurrentRedeem(t *testing.T) {

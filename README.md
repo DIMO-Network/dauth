@@ -117,11 +117,12 @@ verifies consumes it, and of concurrent ones exactly one does. Returns
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`
 (400, also for a proof over 4 KiB or from another key), `invalid_grant` (401:
 bad nonce, bad signature, unknown key, or a DID the directory does not hold
-(404) or will not serve (400, 410, 422)), `server_error` (503 when the
-challenge store is unavailable, the DPoP proof could not be checked (with
-`Retry-After: 1`), or the directory does not answer: a timeout, 408, 429, any
+(404) or will not serve (400, 410, 422)), `server_error` (503 with
+`Retry-After: 1` when the challenge store is unavailable, the DPoP proof could
+not be checked, or the directory does not answer: a timeout, 408, 429, any
 other 4xx or a 5xx; the challenge is not spent, so retry `/token` with the
-same nonce and signature and a fresh DPoP proof). Either
+same nonce and signature and a fresh DPoP proof). `/signin/challenge` answers
+the same 503 when the challenge store is unavailable. Either
 endpoint may also answer `rate_limited` (see below).
 
 ### Rate limit
@@ -256,9 +257,9 @@ Returns `{ token, token_type: "DPoP", expires_in, expires_at }`. Refusals:
 (400), `invalid_request` (400, also when the host cannot read the request),
 the host's own code (403: `not_covered`, `exclusive_hold` with `suspended`,
 `unauthorized`, `revoked`, `not_valid`, …; 404 `not_found`), `server_error`
-(502 when the host is unreachable, 503 when the directory does not answer for
-the app's DID: a timeout, 408, 429, any other 4xx or a 5xx, or when the DPoP
-proof could not be checked, with `Retry-After: 1`). An app DID the
+(502 when the host is unreachable; 503 with `Retry-After: 1` when the
+directory does not answer for the app's DID: a timeout, 408, 429, any other
+4xx or a 5xx, or when the DPoP proof could not be checked). An app DID the
 directory does not hold or will not serve (404, 400, 410, 422) is
 `invalid_client`.
 

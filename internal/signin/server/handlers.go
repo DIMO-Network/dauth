@@ -374,7 +374,6 @@ func (h *Handlers) proofFailed(w http.ResponseWriter, err error) {
 		return
 	}
 	h.Log.Warn().Err(err).Msg("checking the DPoP proof")
-	w.Header().Set("Retry-After", "1")
 	writeError(w, http.StatusServiceUnavailable, "server_error", "could not check the DPoP proof, retry shortly")
 }
 
@@ -437,7 +436,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // writeError emits an OAuth-style error body so clients can branch on a stable
-// code without parsing prose.
+// code without parsing prose. Every 503 on this surface (the directory, the
+// challenge store, a DPoP proof that could not be checked) is retryable and
+// leaves the challenge in place, so each says when to retry: Retry-After: 1
+// unless the caller set one.
 func writeError(w http.ResponseWriter, status int, code, description string) {
+	if status == http.StatusServiceUnavailable && w.Header().Get("Retry-After") == "" {
+		w.Header().Set("Retry-After", "1")
+	}
 	writeJSON(w, status, errorResponse{Error: code, ErrorDescription: description})
 }
