@@ -300,7 +300,7 @@ func (h *Handlers) Token() http.Handler {
 		}
 		jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.TokenURL, "")
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
+			h.proofFailed(w, err)
 			return
 		}
 		// Verify computes the same thumbprint over the same header, so this
@@ -359,6 +359,23 @@ func (h *Handlers) Token() http.Handler {
 			Scope:     identity.FormatScope(ch.Scopes),
 		})
 	})
+}
+
+// proofFailed answers a DPoP Verify error. Every proof failure wraps
+// dpop.ErrInvalid and is 400 invalid_dpop_proof. Any other error means the
+// proof could not be checked, not that it is bad, so it is a retryable 503 and
+// the challenge is left for the retry. With the did-directory dauth pins today
+// every Verify error wraps ErrInvalid; dpop.ErrReplayCacheFull, which does
+// not, arrives with the did-directory bump, and a full replay cache then lands
+// here with no further change.
+func (h *Handlers) proofFailed(w http.ResponseWriter, err error) {
+	if errors.Is(err, dpop.ErrInvalid) {
+		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
+		return
+	}
+	h.Log.Warn().Err(err).Msg("checking the DPoP proof")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "server_error", "could not check the DPoP proof, retry shortly")
 }
 
 // challengeLookupFailed answers a Peek or Consume error: a missing challenge is

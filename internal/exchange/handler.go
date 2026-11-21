@@ -60,6 +60,12 @@ type errorResponse struct {
 	Suspended        []string `json:"suspended,omitempty"`
 }
 
+// ProofVerifier checks a DPoP proof and returns the thumbprint of the key that
+// made it. did-directory's *dpop.Verifier is one.
+type ProofVerifier interface {
+	Verify(proof, method, requestURL, accessToken string) (string, error)
+}
+
 // Handler serves the exchange.
 type Handler struct {
 	Config Config
@@ -70,7 +76,7 @@ type Handler struct {
 	// was verified by the middleware.
 	Assertions *AssertionVerifier
 	// DPoP verifies proofs; ExchangeURL is the htu a proof must name.
-	DPoP        *dpop.Verifier
+	DPoP        ProofVerifier
 	ExchangeURL string
 	Log         zerolog.Logger
 	// Now is the clock; nil means time.Now.
@@ -103,7 +109,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	jkt, err := h.DPoP.Verify(proof, http.MethodPost, h.ExchangeURL, who.Token)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
+		h.proofFailed(w, err)
 		return
 	}
 	// One key from sign-in to data: the proof must come from the key the
@@ -330,6 +336,23 @@ func compareTimes(a, b *time.Time, nilFirst bool) int {
 	default:
 		return a.Compare(*b)
 	}
+}
+
+// proofFailed answers a DPoP Verify error. Every proof failure wraps
+// dpop.ErrInvalid and is 400 invalid_dpop_proof. Any other error means the
+// proof could not be checked, not that it is bad, so it is a retryable 503.
+// With the did-directory dauth pins today every Verify error wraps
+// ErrInvalid; dpop.ErrReplayCacheFull, which does not, arrives with the
+// did-directory bump, and a full replay cache then lands here with no further
+// change.
+func (h *Handler) proofFailed(w http.ResponseWriter, err error) {
+	if errors.Is(err, dpop.ErrInvalid) {
+		writeError(w, http.StatusBadRequest, "invalid_dpop_proof", err.Error())
+		return
+	}
+	h.Log.Warn().Err(err).Msg("checking the DPoP proof")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "server_error", "could not check the DPoP proof, retry shortly")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

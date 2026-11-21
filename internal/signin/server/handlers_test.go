@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -697,6 +698,50 @@ func TestTokenBadSignatureLeavesChallenge(t *testing.T) {
 
 	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
 	assert.Equal(t, http.StatusOK, status, body)
+}
+
+// failingDPoP refuses every proof with err.
+type failingDPoP struct{ err error }
+
+func (f failingDPoP) Verify(string, string, string, string) (string, error) { return "", f.err }
+
+// A DPoP error that does not wrap dpop.ErrInvalid means the proof could not be
+// checked (a full replay cache, once did-directory's ErrReplayCacheFull
+// arrives), not that it is bad: 503 with Retry-After, and the challenge is left
+// for the retry. An ErrInvalid failure is still 400 invalid_dpop_proof.
+func TestTokenUncheckableProofIs503(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	req := map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)}
+
+	e.handlers.DPoP = failingDPoP{err: errors.New("DPoP replay cache full")}
+	proof, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+	require.NoError(t, err)
+	raw, err := json.Marshal(req)
+	require.NoError(t, err)
+	httpReq, err := http.NewRequest(http.MethodPost, e.ts.URL+"/token", bytes.NewReader(raw))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(dpop.HeaderName, proof)
+	resp, err := http.DefaultClient.Do(httpReq)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, body)
+	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+	assert.Equal(t, "server_error", body["error"])
+	_, err = e.handlers.Store.Peek(context.Background(), n)
+	require.NoError(t, err, "a proof that could not be checked must not spend the challenge")
+
+	e.handlers.DPoP = failingDPoP{err: fmt.Errorf("%w: proof replayed", dpop.ErrInvalid)}
+	status, out := e.redeem(t, e.holder, req)
+	assert.Equal(t, http.StatusBadRequest, status, out)
+	assert.Equal(t, "invalid_dpop_proof", out["error"])
+
+	e.handlers.DPoP = dpop.NewVerifier()
+	status, out = e.redeem(t, e.holder, req)
+	assert.Equal(t, http.StatusOK, status, out)
 }
 
 // Concurrent redemptions of one challenge, each with its own fresh proof from

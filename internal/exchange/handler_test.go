@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -148,6 +149,7 @@ func (f *fakeHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type env struct {
 	ts          *httptest.Server
+	handler     *Handler
 	host        *fakeHost
 	hostSrv     *httptest.Server
 	signin      *token.Issuer
@@ -203,7 +205,7 @@ func newEnv(t *testing.T) *env {
 
 	key, err := dpop.GenerateKey()
 	require.NoError(t, err)
-	return &env{ts: ts, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, keys: keys, now: now}
+	return &env{ts: ts, handler: h, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, keys: keys, now: now}
 }
 
 // identity is did's identity token addressed to the exchange, with the read
@@ -477,6 +479,46 @@ func TestExchangeRefusals(t *testing.T) {
 		status, body := e.exchange(t, identity, true, request)
 		assert.Equal(t, http.StatusBadGateway, status, body)
 	})
+}
+
+// failingDPoP refuses every proof with err.
+type failingDPoP struct{ err error }
+
+func (f failingDPoP) Verify(string, string, string, string) (string, error) { return "", f.err }
+
+// A DPoP error that does not wrap dpop.ErrInvalid means the proof could not be
+// checked (a full replay cache, once did-directory's ErrReplayCacheFull
+// arrives), not that it is bad: 503 with Retry-After, and the host is not
+// asked. An ErrInvalid failure is still 400 invalid_dpop_proof.
+func TestExchangeUncheckableProofIs503(t *testing.T) {
+	e := newEnv(t)
+	identity := e.identity(t, callerDID)
+	e.handler.DPoP = failingDPoP{err: errors.New("DPoP replay cache full")}
+
+	raw, err := json.Marshal(request)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, e.ts.URL+"/exchange", bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "DPoP "+identity)
+	proof, err := e.key.Proof(http.MethodPost, exchangeURL, identity, time.Now())
+	require.NoError(t, err)
+	req.Header.Set(dpop.HeaderName, proof)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, body)
+	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+	assert.Equal(t, "server_error", body["error"])
+	assert.Empty(t, e.host.requests, "the host is not asked when the proof could not be checked")
+
+	e.handler.DPoP = failingDPoP{err: fmt.Errorf("%w: proof replayed", dpop.ErrInvalid)}
+	status, out := e.exchange(t, identity, true, request)
+	assert.Equal(t, http.StatusBadRequest, status, out)
+	assert.Equal(t, "invalid_dpop_proof", out["error"])
+	assert.Empty(t, e.host.requests)
 }
 
 func TestExchangeClientAssertion(t *testing.T) {
