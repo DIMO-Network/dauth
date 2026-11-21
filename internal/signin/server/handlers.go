@@ -274,6 +274,12 @@ func (h *Handlers) Token() http.Handler {
 		// Peek first, so a request for an unknown, used or expired nonce
 		// stops here: its proof is never verified, so its jti is never
 		// recorded. All three surface identically as invalid_grant.
+		//
+		// Nothing spends the challenge until the signature has verified. A
+		// refused proof, a bad signature or an unknown key (400 or 401) and a
+		// directory that did not answer (503) all leave it outstanding, so the
+		// client may retry /token with the same signature and a fresh DPoP
+		// proof (a verified proof's jti is recorded, so the old one is spent).
 		ch, err := h.Store.Peek(r.Context(), req.Nonce)
 		if err != nil {
 			h.challengeLookupFailed(w, err)
@@ -281,8 +287,8 @@ func (h *Handlers) Token() http.Handler {
 		}
 		// A proof from another key is turned away on its header's jwk, before
 		// Verify runs: it spends nothing and records no jti. Only a proof that
-		// names the challenge's own key is verified, and a verified proof goes
-		// on to consume the challenge.
+		// names the challenge's own key is verified, and only a verified proof
+		// goes on to the signature check.
 		claimed, err := proofKeyThumbprint(proof)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "DPoP proof header has no usable jwk")
@@ -303,24 +309,17 @@ func (h *Handlers) Token() http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid_dpop_proof", "the DPoP proof is not from the key the challenge names")
 			return
 		}
-		// Consume only as the key the challenge names. Of concurrent requests
-		// for one nonce exactly one gets here with the challenge; the rest
-		// get invalid_grant.
-		ch, err = h.Store.Consume(r.Context(), req.Nonce, jkt)
-		if err != nil {
-			h.challengeLookupFailed(w, err)
-			return
-		}
 
-		// Verify against the stored canonical message and the DID's current
-		// document. A key rotated out since the challenge was issued no longer
-		// signs in, which is the point of resolving at token time.
+		// Verify against the peeked challenge's stored canonical message and
+		// the DID's current document, before anything is spent. A key rotated
+		// out since the challenge was issued no longer signs in, which is the
+		// point of resolving at token time.
 		err = h.Verifier.Verify(r.Context(), ch.DID, fragment, []byte(ch.Message), req.Signature)
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrDirectory):
-			// The nonce is already consumed; the client must request a fresh
-			// challenge and retry.
+			// The challenge is not spent: the client may retry /token with the
+			// same signature and a fresh DPoP proof, without signing again.
 			h.Log.Warn().Err(err).Str("did", ch.DID).Msg("directory unavailable during sign-in")
 			writeError(w, http.StatusServiceUnavailable, "server_error", "could not resolve the DID, retry shortly")
 			return
@@ -331,6 +330,18 @@ func (h *Handlers) Token() http.Handler {
 		default:
 			h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("invalid signature")
 			writeError(w, http.StatusUnauthorized, "invalid_grant", "signature does not verify against the DID's key")
+			return
+		}
+
+		// Consume only once the signature has verified, and only as the key
+		// the challenge names. Of concurrent requests for one nonce that get
+		// this far, exactly one gets the challenge; the rest get
+		// invalid_grant. A nonce is random and never reissued, so the record
+		// Consume returns is the one peeked and verified above, and the token
+		// is issued from it.
+		ch, err = h.Store.Consume(r.Context(), req.Nonce, jkt)
+		if err != nil {
+			h.challengeLookupFailed(w, err)
 			return
 		}
 

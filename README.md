@@ -50,10 +50,11 @@ client                                     dauth                          DID di
   │                                          │                                  │
   │  POST /signin/token {nonce, signature}   │                                  │
   │  DPoP: <proof from the jkt key>          │                                  │
-  │ ────────────────────────────────────────▶  check proof, consume nonce       │
+  │ ────────────────────────────────────────▶  check proof                      │
   │                                          │  GET /:did ──────────────────────▶
   │                                          │  ◀── DID document                │
   │                                          │  verify against #signing         │
+  │                                          │  consume nonce                   │
   │  ◀────────────────────────────────────── { token, token_type, expires_in }  │
 ```
 
@@ -107,8 +108,10 @@ carries `DPoP: <proof>` for `POST <PUBLIC_BASE_URL>/signin/token` from the key
 the challenge named. An unknown, used or expired nonce is refused before the
 proof is checked, and so is a proof whose header `jwk` is not the named key:
 neither is verified, so neither records a `jti`, and neither (nor a missing
-proof) spends the challenge. Only a request holding the named key consumes
-it, and of concurrent ones exactly one does. Returns
+proof) spends the challenge. Nor does a bad signature, an unknown key or a
+directory that does not answer: the signature is checked before the challenge
+is consumed, so only a request holding the named key with a signature that
+verifies consumes it, and of concurrent ones exactly one does. Returns
 `{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
 `APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`
@@ -116,7 +119,8 @@ it, and of concurrent ones exactly one does. Returns
 bad nonce, bad signature, unknown key, or a DID the directory does not hold
 (404) or will not serve (400, 410, 422)), `server_error` (503 when the
 challenge store is unavailable, or the directory does not answer: a timeout,
-408, 429, any other 4xx or a 5xx; get a fresh challenge and retry). Either
+408, 429, any other 4xx or a 5xx; the challenge is not spent, so retry
+`/token` with the same nonce and signature and a fresh DPoP proof). Either
 endpoint may also answer `rate_limited` (see below).
 
 ### Rate limit

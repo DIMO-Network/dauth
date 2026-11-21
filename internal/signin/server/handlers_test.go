@@ -649,6 +649,56 @@ func TestTokenWrongKeyLeavesChallenge(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status, body, "the right key must still redeem the challenge")
 }
 
+// A directory that does not answer is a 503 that spends nothing: the client
+// retries /token with the same nonce and signature and a fresh proof, without
+// signing again.
+func TestTokenDirectoryOutageLeavesChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	req := map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)}
+
+	e.directory.err = fmt.Errorf("%w: connection refused", ErrDirectory)
+	status, body := e.redeem(t, e.holder, req)
+	require.Equal(t, http.StatusServiceUnavailable, status, body)
+	assert.Equal(t, "server_error", body["error"])
+	_, err := e.handlers.Store.Peek(context.Background(), n)
+	require.NoError(t, err, "a directory outage must not spend the challenge")
+
+	e.directory.err = nil
+	status, body = e.redeem(t, e.holder, req)
+	require.Equal(t, http.StatusOK, status, body, "the retry with a fresh proof must redeem the challenge")
+	assert.Equal(t, "DPoP", body["token_type"])
+
+	status, body = e.redeem(t, e.holder, req)
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_grant", body["error"], "a redeemed challenge is spent")
+}
+
+// A bad signature or an unknown key is refused without spending the
+// challenge, so the right signature still redeems it.
+func TestTokenBadSignatureLeavesChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	for name, req := range map[string]map[string]any{
+		"another key's signature":        {"nonce": n, "signature": sign(t, other, msg)},
+		"signature over another message": {"nonce": n, "signature": sign(t, e.priv, msg+" ")},
+		"unknown verification method":    {"nonce": n, "signature": sign(t, e.priv, msg), "key": "other"},
+		"the org commit key":             {"nonce": n, "signature": sign(t, e.priv, msg), "key": "dimo_org"},
+	} {
+		status, body := e.redeem(t, e.holder, req)
+		require.Equal(t, http.StatusUnauthorized, status, "%s: %v", name, body)
+		require.Equal(t, "invalid_grant", body["error"], name)
+		_, err := e.handlers.Store.Peek(context.Background(), n)
+		require.NoError(t, err, "%s must not spend the challenge", name)
+	}
+
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	assert.Equal(t, http.StatusOK, status, body)
+}
+
 // Concurrent redemptions of one challenge, each with its own fresh proof from
 // the right key: exactly one gets a token.
 func TestTokenConcurrentRedeem(t *testing.T) {

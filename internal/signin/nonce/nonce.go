@@ -1,11 +1,11 @@
 // Package nonce stores the short-lived, single-use challenges issued during
 // sign-in. dauth holds the challenge text here, keyed by its nonce, so the
 // token endpoint can find the outstanding challenge from the nonce the client
-// returns, check the request against it without spending it, consume the entry
-// atomically once the request holds the key it names, and verify the signature
-// against the stored copy, giving true single-use replay protection. The store
-// is the only server-side state in the login flow; the issued JWTs remain
-// stateless.
+// returns, check the request and its signature against the stored copy without
+// spending it, and consume the entry atomically only once the request holds the
+// key it names and the signature verifies, giving true single-use replay
+// protection. The store is the only server-side state in the login flow; the
+// issued JWTs remain stateless.
 package nonce
 
 import (
