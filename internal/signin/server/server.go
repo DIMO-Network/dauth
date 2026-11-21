@@ -80,9 +80,10 @@ func rateLimit(perSecond int) func(http.Handler) http.Handler {
 }
 
 // cors lets the listed origins call the sign-in surface from a browser. It
-// answers an OPTIONS preflight from an allowed origin itself and adds the
-// allow-origin header to the real responses; any other origin gets neither,
-// and the browser blocks the call. Every response carries Vary: Origin, with
+// answers an OPTIONS preflight from an allowed origin itself and, on the real
+// responses, adds the allow-origin header and exposes Retry-After. It wraps
+// the rate limiter, so the limiter's 429 carries both. Any other origin gets
+// none of these, and the browser blocks the call. Every response carries Vary: Origin, with
 // or without an Origin header on the request, so a shared cache never serves
 // one origin's answer to another. It is applied to /signin only, never to
 // /exchange.
@@ -105,6 +106,9 @@ func cors(origins []string, next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		// Browsers hide response headers outside the CORS-safelisted set,
+		// and a client needs Retry-After to back off from a 429 or 503.
+		w.Header().Set("Access-Control-Expose-Headers", "Retry-After")
 		next.ServeHTTP(w, r)
 	})
 }

@@ -500,6 +500,47 @@ func TestCORS(t *testing.T) {
 	})
 }
 
+// A browser reads Retry-After only when the response exposes it, so a real
+// response to an allowed origin does, a retryable 503 here. Any other origin
+// gets no CORS headers at all.
+func TestCORSExposesRetryAfter(t *testing.T) {
+	e := newTestEnv(t)
+	wk, err := oidc.NewWellKnown(oidc.Config{Issuer: testIssuer, JWKSURI: testIssuer + "/keys", Keys: e.keys})
+	require.NoError(t, err)
+	ts := httptest.NewServer(NewHandler(Config{Handlers: e.handlers, WellKnown: wk, CORSOrigins: []string{"https://login.test"}}))
+	t.Cleanup(ts.Close)
+	msg, n := e.challenge(t, testDID)
+	raw, err := json.Marshal(map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	require.NoError(t, err)
+	e.handlers.DPoP = failingDPoP{err: errors.New("DPoP replay cache full")}
+
+	unavailable := func(origin string) *http.Response {
+		proof, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/token", bytes.NewReader(raw))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(dpop.HeaderName, proof)
+		req.Header.Set("Origin", origin)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, origin)
+		assert.Equal(t, "1", resp.Header.Get("Retry-After"), origin)
+		return resp
+	}
+
+	resp := unavailable("https://login.test")
+	assert.Equal(t, "https://login.test", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "Retry-After", resp.Header.Get("Access-Control-Expose-Headers"))
+
+	resp = unavailable("https://evil.test")
+	for _, h := range []string{"Access-Control-Allow-Origin", "Access-Control-Expose-Headers", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"} {
+		assert.Empty(t, resp.Header.Get(h), h)
+	}
+	assert.Contains(t, resp.Header.Values("Vary"), "Origin")
+}
+
 // postTo posts body as JSON to url and returns the status and headers.
 func postTo(t *testing.T, url string, body any) (int, http.Header) {
 	t.Helper()
@@ -992,6 +1033,7 @@ func TestRateLimitPerIP(t *testing.T) {
 	assert.NotEmpty(t, body["error_description"])
 	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
 	assert.Equal(t, "https://login.test", resp.Header.Get("Access-Control-Allow-Origin"), "a browser can read the 429")
+	assert.Equal(t, "Retry-After", resp.Header.Get("Access-Control-Expose-Headers"), "and its Retry-After")
 
 	// /token shares the client's bucket.
 	resp, body = postAs(t, ts.URL+"/token", "203.0.113.1", map[string]any{"nonce": "n", "signature": "s"})
