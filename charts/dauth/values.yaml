@@ -2,6 +2,10 @@ replicaCount: 1
 image:
   repository: dimozone/dauth
   pullPolicy: IfNotPresent
+  # Dev: CI (buildpushdev.yml) writes the 7-character SHA of the latest main
+  # image to tag, and edits nothing else. Empty falls back to Chart.appVersion.
+  # Prod sets requireTag, so an empty tag fails the render.
+  requireTag: false
   tag: 52f18e8
 imagePullSecrets: []
 nameOverride: ''

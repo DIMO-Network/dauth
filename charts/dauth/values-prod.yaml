@@ -1,3 +1,9 @@
+image:
+  # Empty on purpose: prod fails to render until a PR promotes a SHA that is
+  # already running in dev (see README.md). It must not inherit values.yaml's
+  # tag, which CI rewrites on every push to main.
+  tag: ""
+  requireTag: true
 env:
   ENVIRONMENT: prod
   LOG_LEVEL: info

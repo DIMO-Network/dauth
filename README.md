@@ -379,6 +379,11 @@ and access.
 `REPLACE_WITH` placeholder). It also sets both to `null`, so prod never
 inherits dev's values from `values.yaml` through Helm's merge.
 
+Prod's image is promoted by PR. `buildpushdev` writes each main push's SHA to
+`values.yaml`'s `image.tag` only, for dev. `values-prod.yaml` sets an empty
+`image.tag` with `image.requireTag: true`, so prod fails to render until a PR
+sets that tag to a SHA already running in dev.
+
 # Development
 
 ```
