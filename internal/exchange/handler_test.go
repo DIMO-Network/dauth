@@ -225,6 +225,9 @@ func (e *env) issue(t *testing.T, req token.Request) string {
 	if req.JKT == "" {
 		req.JKT = e.key.Thumbprint()
 	}
+	if req.VM == "" {
+		req.VM = "signing"
+	}
 	tok, _, err := e.signin.Issue(req)
 	require.NoError(t, err)
 	return tok
@@ -383,7 +386,7 @@ func TestExchangeRefusals(t *testing.T) {
 	t.Run("identity token from another issuer", func(t *testing.T) {
 		otherKeys, _ := newKeySet(t)
 		other := token.NewIssuer(token.Config{Keys: otherKeys, Issuer: signinIssuer, Audience: []string{"dimo"}, TTL: time.Hour})
-		tok, _, err := other.Issue(token.Request{DID: callerDID, Audience: []string{exchangeURL}, Scopes: []string{"read"}, JKT: e.key.Thumbprint()})
+		tok, _, err := other.Issue(token.Request{DID: callerDID, Audience: []string{exchangeURL}, Scopes: []string{"read"}, JKT: e.key.Thumbprint(), VM: "signing"})
 		require.NoError(t, err)
 		status, body := e.exchange(t, tok, true, request)
 		assert.Equal(t, http.StatusUnauthorized, status, body)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -321,7 +322,7 @@ func (h *Handlers) Token() http.Handler {
 		// the DID's current document, before anything is spent. A key rotated
 		// out since the challenge was issued no longer signs in, which is the
 		// point of resolving at token time.
-		err = h.Verifier.Verify(r.Context(), ch.DID, fragment, []byte(ch.Message), req.Signature)
+		signer, err := h.Verifier.VerifyMethod(r.Context(), ch.DID, fragment, []byte(ch.Message), req.Signature)
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrDirectory):
@@ -342,6 +343,33 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 
+		// approve is the scope relying parties put behind a second look, so
+		// only a key that could also sign the DID's next operation gets it:
+		// the method that signed must be one of the head's rotation keys.
+		// A person has it by signing in with #wallet, an org with #signing
+		// (its root); a device key signs in for read and write only.
+		if slices.Contains(ch.Scopes, identity.ScopeApprove) {
+			ok, err := h.Verifier.IsRotationKey(r.Context(), ch.DID, signer)
+			switch {
+			case err == nil && ok:
+			case err == nil:
+				h.Log.Warn().Str("did", ch.DID).Str("vm", fragment).Str("remote", httpmw.RemoteIP(r)).Msg("approve asked for without a rotation key")
+				h.spend(r, req.Nonce, jkt)
+				writeError(w, http.StatusForbidden, "key_not_allowed", "approve needs a rotation key")
+				return
+			case errors.Is(err, ErrDIDNotFound), errors.Is(err, ErrDIDUnusable):
+				h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("sign-in DID head not found")
+				h.spend(r, req.Nonce, jkt)
+				writeError(w, http.StatusUnauthorized, "invalid_grant", err.Error())
+				return
+			default:
+				// As for the document: the challenge is kept for the retry.
+				h.Log.Warn().Err(err).Str("did", ch.DID).Msg("reading the DID head during sign-in")
+				writeError(w, http.StatusServiceUnavailable, "server_error", "could not resolve the DID, retry shortly")
+				return
+			}
+		}
+
 		// Consume only once the signature has verified, and only as the key
 		// the challenge names. Of concurrent requests for one nonce that get
 		// this far, exactly one gets the challenge; the rest get
@@ -354,7 +382,7 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 
-		tok, _, err := h.Issuer.Issue(token.Request{DID: ch.DID, Audience: ch.Audience, Scopes: ch.Scopes, JKT: ch.JKT})
+		tok, _, err := h.Issuer.Issue(token.Request{DID: ch.DID, Audience: ch.Audience, Scopes: ch.Scopes, JKT: ch.JKT, VM: fragment})
 		if err != nil {
 			h.Log.Error().Err(err).Msg("issuing token")
 			writeError(w, http.StatusInternalServerError, "server_error", "could not issue token")

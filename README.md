@@ -84,8 +84,13 @@ The profile is did-directory's `pkg/identity`; proofs are its `pkg/dpop`.
 `scope` is required: one or more of `read` (reads, `/authorize`, and what the
 exchange requires), `write` (record writes, withdrawing a pending write) and
 `approve` (approving a pending write, `revoke-authored-by`, registering a
-repository), space-separated. `jkt` is required: the thumbprint of the DPoP
-key the token will be bound to. An unknown scope is `invalid_scope`.
+repository), space-separated. `approve` is issued only to a key that could
+also sign the DID's next operation: the verification method that signs in
+must be one of the rotation keys of the DID's head. A person gets it by
+signing in with `#wallet`, an org with `#signing` (its root); a device key
+signs in for `read` and `write` only. `jkt` is required: the thumbprint of
+the DPoP key the token will be bound to. An unknown scope is
+`invalid_scope`.
 
 `audience` names the service the token is for, and every service that takes
 these tokens checks it: the exchange accepts only `<PUBLIC_BASE_URL>/exchange`,
@@ -112,14 +117,18 @@ proof, nor one that fails to verify) spends the challenge, so whoever has only
 the nonce cannot burn it. Once the proof verifies as the named key, the
 attempt counts: a bad signature, an unknown key, or a DID the directory does
 not hold or will not serve spends the challenge, and the client starts again
-with a new one. A directory that does not answer spends nothing. Of concurrent
+with a new one. So does an `approve` challenge signed by a key that is not a
+rotation key: 403 `key_not_allowed`, "approve needs a rotation key" (dauth
+reads the rotation keys from the directory's `GET /<did>/data` only for
+`approve`). A directory that does not answer spends nothing. Of concurrent
 requests that verify, exactly one gets the token. Returns
 `{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
 `APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`
 (400, also for a proof over 4 KiB or from another key), `invalid_grant` (401:
 bad nonce, bad signature, unknown key, or a DID the directory does not hold
-(404) or will not serve (400, 410, 422)), `server_error` (503 with
+(404) or will not serve (400, 410, 422)), `key_not_allowed` (403: `approve`
+from a key that is not a rotation key), `server_error` (503 with
 `Retry-After: 1` when the challenge store is unavailable, the DPoP proof could
 not be checked, or the directory does not answer: a timeout, 408, 429, any
 other 4xx or a 5xx; the challenge is not spent, so retry `/token` with the
@@ -188,8 +197,10 @@ Any other origin gets no CORS headers, and `/exchange` sends none.
 ## Token
 
 `iss`, `sub` (the DID), `aud`, `iat`, `nbf`, `exp`, `jti`, `scope`
-(space-separated) and `cnf: {jkt}`. RS256, `kid` = RFC 7638 thumbprint of the
-signing key.
+(space-separated), `cnf: {jkt}` and `vm`, the fragment of the verification
+method that signed in, without `#` (`"wallet"`, `"signing"`). The token dauth
+mints for itself to call the org host (see below) was not signed in for and
+has no `vm`. RS256, `kid` = RFC 7638 thumbprint of the signing key.
 
 ---
 

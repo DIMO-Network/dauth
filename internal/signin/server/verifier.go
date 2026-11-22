@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -39,6 +40,11 @@ type Directory interface {
 	// that is not a valid DID (isDID; no request is made), and
 	// wraps ErrDirectory for any other failure, which a retry may get past.
 	VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error)
+	// RotationKeys returns the rotation keys of did's head operation, as
+	// did:key strings: the keys that may sign the DID's next operation. It
+	// wraps ErrDIDUnusable for a DID that is not valid (no request is made)
+	// and ErrDirectory for any failure to read the head.
+	RotationKeys(ctx context.Context, did string) ([]string, error)
 }
 
 // ErrDIDUnusable means the directory will not serve a document for the DID:
@@ -88,6 +94,31 @@ func (d *DirectoryClient) VerificationMethods(ctx context.Context, did string) (
 	return out, nil
 }
 
+// RotationKeys implements Directory. The DID document does not carry
+// rotation keys, so they come from the head the directory serves at
+// GET /<did>/data. Only an approve sign-in reads it, after the document has
+// resolved and the signature verified, so the DID is known to be served, and
+// any failure here (the client's RawGet reports no typed status) is the
+// directory failing to answer: ErrDirectory, which the client retries.
+func (d *DirectoryClient) RotationKeys(ctx context.Context, did string) ([]string, error) {
+	if !isDID(did) {
+		return nil, fmt.Errorf("%w: not a valid DID", ErrDIDUnusable)
+	}
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+	raw, err := d.Client.RawGet(ctx, d.Client.BaseURL()+"/"+did+"/data")
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading the DID head: %v", ErrDirectory, err)
+	}
+	var head struct {
+		RotationKeys []string `json:"rotationKeys"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, fmt.Errorf("%w: decoding the DID head: %v", ErrDirectory, err)
+	}
+	return head.RotationKeys, nil
+}
+
 // orgKeyFragment is the org repository commit key (plan §1 decision C). It
 // signs commits on the org host and is never a login key: whoever holds it
 // may publish records as the org, not act as the org elsewhere.
@@ -107,12 +138,19 @@ type Verifier struct {
 // not be fetched. ErrDIDNotFound and ErrDIDUnusable come back from the
 // directory as they are.
 func (v *Verifier) Verify(ctx context.Context, did, fragment string, data []byte, sig string) error {
+	_, err := v.VerifyMethod(ctx, did, fragment, data, sig)
+	return err
+}
+
+// VerifyMethod is Verify, and on success also returns the verification
+// method's key as a did:key.
+func (v *Verifier) VerifyMethod(ctx context.Context, did, fragment string, data []byte, sig string) (string, error) {
 	if fragment == orgKeyFragment {
-		return fmt.Errorf("%w: #%s is a commit key, not a sign-in key", ErrNoSuchKey, fragment)
+		return "", fmt.Errorf("%w: #%s is a commit key, not a sign-in key", ErrNoSuchKey, fragment)
 	}
 	methods, err := v.Directory.VerificationMethods(ctx, did)
 	if err != nil {
-		return err
+		return "", err
 	}
 	want := did + "#" + fragment
 	for _, vm := range methods {
@@ -121,11 +159,34 @@ func (v *Verifier) Verify(ctx context.Context, did, fragment string, data []byte
 		}
 		pub, err := didkey.DecodeMultibase(vm.PublicKeyMultibase)
 		if err != nil {
-			return fmt.Errorf("decode %s: %w", vm.ID, err)
+			return "", fmt.Errorf("decode %s: %w", vm.ID, err)
 		}
-		return pub.Verify(data, sig)
+		if err := pub.Verify(data, sig); err != nil {
+			return "", err
+		}
+		return pub.DIDKey(), nil
 	}
-	return fmt.Errorf("%w: %s", ErrNoSuchKey, want)
+	return "", fmt.Errorf("%w: %s", ErrNoSuchKey, want)
+}
+
+// IsRotationKey reports whether didKey is one of the rotation keys of did's
+// head. Keys are compared decoded, so two encodings of one key match. Errors
+// are the Directory's.
+func (v *Verifier) IsRotationKey(ctx context.Context, did, didKey string) (bool, error) {
+	want, err := didkey.Decode(didKey)
+	if err != nil {
+		return false, fmt.Errorf("decode %s: %w", didKey, err)
+	}
+	keys, err := v.Directory.RotationKeys(ctx, did)
+	if err != nil {
+		return false, err
+	}
+	for _, k := range keys {
+		if pub, err := didkey.Decode(k); err == nil && pub.DIDKey() == want.DIDKey() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // maxDIDLen caps a DID before it reaches the store or the directory.

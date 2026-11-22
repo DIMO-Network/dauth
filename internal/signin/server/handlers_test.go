@@ -51,6 +51,22 @@ type fakeDirectory struct {
 	err  error
 	// resolves counts VerificationMethods calls.
 	resolves atomic.Int32
+	// rotation is each DID head's rotation keys (did:key strings); headErr,
+	// when set, is what reading a head fails with.
+	rotation map[string][]string
+	headErr  error
+	heads    atomic.Int32
+}
+
+func (d *fakeDirectory) RotationKeys(_ context.Context, did string) ([]string, error) {
+	d.heads.Add(1)
+	if d.headErr != nil {
+		return nil, d.headErr
+	}
+	if _, ok := d.docs[did]; !ok {
+		return nil, ErrDIDNotFound
+	}
+	return d.rotation[did], nil
 }
 
 func (d *fakeDirectory) VerificationMethods(_ context.Context, did string) ([]VerificationMethod, error) {
@@ -326,6 +342,7 @@ func TestSignInRefusals(t *testing.T) {
 // approve lifetime, whatever else it carries.
 func TestSignInApproveIsShortLived(t *testing.T) {
 	e := newTestEnv(t)
+	e.setRotationKeys(testDID, didKeyOf(t, e.priv)) // #signing is the root, as on an org
 	msg, n := e.challengeFor(t, testDID, "approve read")
 	assert.Contains(t, msg, "Scope: read approve")
 	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
@@ -1225,4 +1242,188 @@ func TestChallengeBudgetIsPerClient(t *testing.T) {
 	stored, err := e.handlers.Store.Peek(context.Background(), other)
 	require.NoError(t, err)
 	assert.Equal(t, "198.51.100.7", stored.Client)
+}
+
+// setRotationKeys makes keys the rotation keys of did's head.
+func (e *testEnv) setRotationKeys(did string, keys ...string) {
+	if e.directory.rotation == nil {
+		e.directory.rotation = map[string][]string{}
+	}
+	e.directory.rotation[did] = keys
+}
+
+// didKeyOf is priv's public key as a did:key.
+func didKeyOf(t *testing.T, priv *ecdsa.PrivateKey) string {
+	t.Helper()
+	pub, err := didkey.FromECDSA(&priv.PublicKey)
+	require.NoError(t, err)
+	return pub.DIDKey()
+}
+
+// tokenClaims decodes an issued token's claims as JSON, checking its
+// signature.
+func (e *testEnv) tokenClaims(t *testing.T, tok string) jwt.MapClaims {
+	t.Helper()
+	claims := jwt.MapClaims{}
+	_, err := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"})).
+		ParseWithClaims(tok, claims, func(*jwt.Token) (any, error) { return e.pub, nil })
+	require.NoError(t, err)
+	return claims
+}
+
+// Contract 1: every token names the verification method that signed in, as
+// its fragment without '#'.
+func TestTokenNamesItsVerificationMethod(t *testing.T) {
+	e := newTestEnv(t)
+	msg, n := e.challenge(t, testDID)
+	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "signing", e.tokenClaims(t, body["token"].(string))["vm"], "the default key")
+
+	const did = "did:dimo:k1member"
+	k1 := e.publishK1(t, did, "wallet")
+	msg, n = e.challenge(t, did)
+	status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg), "key": "#wallet"})
+	require.Equal(t, http.StatusOK, status, body)
+	assert.Equal(t, "wallet", e.tokenClaims(t, body["token"].(string))["vm"], "named with or without '#', claimed without")
+}
+
+// Contract 1 (R5-F2): approve is issued only when the did:key of the
+// verification method that signed in is also one of the DID head's rotation
+// keys. Otherwise /signin/token answers 403 key_not_allowed, and the refused
+// attempt spends the challenge.
+func TestApproveNeedsRotationKey(t *testing.T) {
+	t.Run("a device key signs in for read and write, not approve", func(t *testing.T) {
+		e := newTestEnv(t)
+		root, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		e.setRotationKeys(testDID, didKeyOf(t, root)) // #signing is not a rotation key
+
+		msg, n := e.challengeFor(t, testDID, "read write")
+		status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+		require.Equal(t, http.StatusOK, status, body)
+		assert.Equal(t, "read write", body["scope"])
+		assert.Zero(t, e.directory.heads.Load(), "only approve reads the head")
+
+		msg, n = e.challengeFor(t, testDID, "read write approve")
+		status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+		assert.Equal(t, http.StatusForbidden, status, body)
+		assert.Equal(t, "key_not_allowed", body["error"])
+		assert.Equal(t, "approve needs a rotation key", body["error_description"])
+		assert.Nil(t, body["token"])
+		_, err = e.handlers.Store.Peek(context.Background(), n)
+		assert.ErrorIs(t, err, nonce.ErrNotFound, "the refused attempt spends the challenge")
+	})
+
+	t.Run("a DID with no rotation keys gets no approve", func(t *testing.T) {
+		e := newTestEnv(t)
+		msg, n := e.challengeFor(t, testDID, "approve")
+		status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+		assert.Equal(t, http.StatusForbidden, status, body)
+		assert.Equal(t, "key_not_allowed", body["error"])
+	})
+
+	t.Run("a person's #wallet, a rotation key, gets approve", func(t *testing.T) {
+		e := newTestEnv(t)
+		const did = "did:dimo:person"
+		k1 := e.publishK1(t, did, "wallet")
+		device := e.publishK1(t, did, "signing")
+		e.setRotationKeys(did, didkey.FromSecp256k1(k1.PubKey()).DIDKey())
+
+		msg, n := e.challengeFor(t, did, "read write approve")
+		status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, k1, msg), "key": "wallet"})
+		require.Equal(t, http.StatusOK, status, body)
+		assert.Equal(t, "read write approve", body["scope"])
+		assert.Equal(t, "wallet", e.tokenClaims(t, body["token"].(string))["vm"])
+
+		msg, n = e.challengeFor(t, did, "approve")
+		status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": signK1(t, device, msg)})
+		assert.Equal(t, http.StatusForbidden, status, "the same person's device key: %v", body)
+	})
+
+	t.Run("an org's #signing, its root, gets approve", func(t *testing.T) {
+		e := newTestEnv(t)
+		e.setRotationKeys(testDID, didKeyOf(t, e.priv))
+		msg, n := e.challengeFor(t, testDID, "read write approve")
+		status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+		require.Equal(t, http.StatusOK, status, body)
+		assert.Equal(t, "signing", e.tokenClaims(t, body["token"].(string))["vm"])
+	})
+
+	t.Run("a head that cannot be read is a 503 that spends nothing", func(t *testing.T) {
+		e := newTestEnv(t)
+		e.setRotationKeys(testDID, didKeyOf(t, e.priv))
+		msg, n := e.challengeFor(t, testDID, "approve")
+		req := map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)}
+
+		e.directory.headErr = fmt.Errorf("%w: connection refused", ErrDirectory)
+		resp := e.redeemResponse(t, req)
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+		_, err := e.handlers.Store.Peek(context.Background(), n)
+		require.NoError(t, err, "the challenge is kept for the retry")
+
+		e.directory.headErr = nil
+		status, body := e.redeem(t, e.holder, req)
+		assert.Equal(t, http.StatusOK, status, body)
+	})
+}
+
+// The real DirectoryClient reads rotation keys from the head the directory
+// serves at GET /<did>/data, alongside the document at GET /<did>.
+func TestApproveThroughDirectoryClient(t *testing.T) {
+	e := newTestEnv(t)
+	signing, err := didkey.FromECDSA(&e.priv.PublicKey)
+	require.NoError(t, err)
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	const org, member = "did:dimo:org", "did:dimo:member2"
+	heads := map[string]string{
+		org:    `{"did":"` + org + `","rotationKeys":["` + signing.DIDKey() + `"]}`,
+		member: `{"did":"` + member + `","rotationKeys":["` + didKeyOf(t, other) + `"]}`,
+	}
+	var headStatus atomic.Int32
+	headStatus.Store(http.StatusOK)
+	dir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		did, data := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/data")
+		head, ok := heads[did]
+		switch {
+		case !ok:
+			http.Error(w, `{"error":"DID not found"}`, http.StatusNotFound)
+		case data && headStatus.Load() != http.StatusOK:
+			http.Error(w, "down", int(headStatus.Load()))
+		case data:
+			_, _ = io.WriteString(w, head)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": did, "verificationMethod": []map[string]string{
+				{"id": did + "#signing", "type": "Multikey", "controller": did, "publicKeyMultibase": signing.Multibase()},
+			}})
+		}
+	}))
+	t.Cleanup(dir.Close)
+	e.handlers.Verifier = &Verifier{Directory: &DirectoryClient{Client: client.New(dir.URL)}}
+	redeem := func(did string) (int, map[string]any) {
+		msg, n := e.challengeFor(t, did, "read approve")
+		return e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+	}
+
+	status, body := redeem(org)
+	assert.Equal(t, http.StatusOK, status, "the org's #signing is its root: %v", body)
+
+	status, body = redeem(member)
+	assert.Equal(t, http.StatusForbidden, status, body)
+	assert.Equal(t, "key_not_allowed", body["error"])
+
+	headStatus.Store(http.StatusInternalServerError)
+	status, body = redeem(org)
+	assert.Equal(t, http.StatusServiceUnavailable, status, body)
+	assert.Equal(t, "server_error", body["error"])
+
+	heads[org] = "not json"
+	headStatus.Store(http.StatusOK)
+	status, body = redeem(org)
+	assert.Equal(t, http.StatusServiceUnavailable, status, body)
+
+	_, err = (&DirectoryClient{Client: client.New(dir.URL)}).RotationKeys(context.Background(), "did:dimo:a/../x")
+	assert.ErrorIs(t, err, ErrDIDUnusable, "an invalid DID never reaches the directory")
 }
