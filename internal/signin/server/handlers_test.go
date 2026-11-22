@@ -58,8 +58,14 @@ type fakeDirectory struct {
 	heads    atomic.Int32
 }
 
-func (d *fakeDirectory) RotationKeys(_ context.Context, did string) ([]string, error) {
+// Both lookups fail on a cancelled context the way DirectoryClient does: the
+// HTTP call fails, which is ErrDirectory.
+
+func (d *fakeDirectory) RotationKeys(ctx context.Context, did string) ([]string, error) {
 	d.heads.Add(1)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDirectory, err)
+	}
 	if d.headErr != nil {
 		return nil, d.headErr
 	}
@@ -69,8 +75,11 @@ func (d *fakeDirectory) RotationKeys(_ context.Context, did string) ([]string, e
 	return d.rotation[did], nil
 }
 
-func (d *fakeDirectory) VerificationMethods(_ context.Context, did string) ([]VerificationMethod, error) {
+func (d *fakeDirectory) VerificationMethods(ctx context.Context, did string) ([]VerificationMethod, error) {
 	d.resolves.Add(1)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDirectory, err)
+	}
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -1426,4 +1435,70 @@ func TestApproveThroughDirectoryClient(t *testing.T) {
 
 	_, err = (&DirectoryClient{Client: client.New(dir.URL)}).RotationKeys(context.Background(), "did:dimo:a/../x")
 	assert.ErrorIs(t, err, ErrDIDUnusable, "an invalid DID never reaches the directory")
+}
+
+// ctxStore is a challenge store whose Consume fails on a cancelled context,
+// as the Postgres store's does.
+type ctxStore struct{ nonce.Store }
+
+func (s ctxStore) Consume(ctx context.Context, n, jkt string) (nonce.Challenge, error) {
+	if err := ctx.Err(); err != nil {
+		return nonce.Challenge{}, fmt.Errorf("consuming challenge: %w", err)
+	}
+	return s.Store.Consume(ctx, n, jkt)
+}
+
+// cancelingDPoP verifies proofs with inner, then cancels the request: the
+// client hangs up just after its proof has verified.
+type cancelingDPoP struct {
+	inner  ProofVerifier
+	cancel context.CancelFunc
+}
+
+func (c cancelingDPoP) Verify(proof, method, requestURL, accessToken string) (string, error) {
+	jkt, err := c.inner.Verify(proof, method, requestURL, accessToken)
+	c.cancel()
+	return jkt, err
+}
+
+// Once the proof has verified as the challenge's key, the attempt runs to
+// completion whatever the client does: hanging up does not turn a refusal
+// into a 503 that leaves the challenge for another try (R5-F7).
+func TestTokenClientAbortStillSpends(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope string
+		setup func(e *testEnv)
+		sig   func(e *testEnv, msg string) string
+		want  int
+	}{
+		{"bad signature", "read", func(*testEnv) {},
+			func(e *testEnv, msg string) string { return sign(t, e.priv, msg+" ") }, http.StatusUnauthorized},
+		{"approve without a rotation key", "approve",
+			func(e *testEnv) { e.setRotationKeys(testDID) },
+			func(e *testEnv, msg string) string { return sign(t, e.priv, msg) }, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			tc.setup(e)
+			e.handlers.Store = ctxStore{Store: e.handlers.Store}
+			msg, n := e.challengeFor(t, testDID, tc.scope)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			e.handlers.DPoP = cancelingDPoP{inner: e.handlers.DPoP, cancel: cancel}
+			raw, err := json.Marshal(map[string]any{"nonce": n, "signature": tc.sig(e, msg)})
+			require.NoError(t, err)
+			proof, err := e.holder.Proof(http.MethodPost, e.ts.URL+"/token", "", time.Now())
+			require.NoError(t, err)
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/token", bytes.NewReader(raw))
+			req.Header.Set(dpop.HeaderName, proof)
+			rec := httptest.NewRecorder()
+			e.handlers.Token().ServeHTTP(rec, req)
+
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+			_, err = e.handlers.Store.Peek(context.Background(), n)
+			assert.ErrorIs(t, err, nonce.ErrNotFound, "the refused attempt spends the challenge")
+		})
+	}
 }

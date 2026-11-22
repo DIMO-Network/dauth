@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -318,11 +319,18 @@ func (h *Handlers) Token() http.Handler {
 			return
 		}
 
+		// From here the attempt is the key holder's, and it runs to the end
+		// whether or not the client stays: the directory lookups and the
+		// store do not see the client hang up, so dropping the connection
+		// cannot turn a refusal into a 503 that leaves the challenge for
+		// another try. Each directory lookup keeps its own resolveTimeout.
+		ctx := context.WithoutCancel(r.Context())
+
 		// Verify against the peeked challenge's stored canonical message and
 		// the DID's current document, before anything is spent. A key rotated
 		// out since the challenge was issued no longer signs in, which is the
 		// point of resolving at token time.
-		signer, err := h.Verifier.VerifyMethod(r.Context(), ch.DID, fragment, []byte(ch.Message), req.Signature)
+		signer, err := h.Verifier.VerifyMethod(ctx, ch.DID, fragment, []byte(ch.Message), req.Signature)
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrDirectory):
@@ -333,12 +341,12 @@ func (h *Handlers) Token() http.Handler {
 			return
 		case errors.Is(err, ErrDIDNotFound), errors.Is(err, ErrDIDUnusable), errors.Is(err, ErrNoSuchKey):
 			h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("sign-in key not found")
-			h.spend(r, req.Nonce, jkt)
+			h.spend(ctx, req.Nonce, jkt)
 			writeError(w, http.StatusUnauthorized, "invalid_grant", err.Error())
 			return
 		default:
 			h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("invalid signature")
-			h.spend(r, req.Nonce, jkt)
+			h.spend(ctx, req.Nonce, jkt)
 			writeError(w, http.StatusUnauthorized, "invalid_grant", "signature does not verify against the DID's key")
 			return
 		}
@@ -349,17 +357,17 @@ func (h *Handlers) Token() http.Handler {
 		// A person has it by signing in with #wallet, an org with #signing
 		// (its root); a device key signs in for read and write only.
 		if slices.Contains(ch.Scopes, identity.ScopeApprove) {
-			ok, err := h.Verifier.IsRotationKey(r.Context(), ch.DID, signer)
+			ok, err := h.Verifier.IsRotationKey(ctx, ch.DID, signer)
 			switch {
 			case err == nil && ok:
 			case err == nil:
 				h.Log.Warn().Str("did", ch.DID).Str("vm", fragment).Str("remote", httpmw.RemoteIP(r)).Msg("approve asked for without a rotation key")
-				h.spend(r, req.Nonce, jkt)
+				h.spend(ctx, req.Nonce, jkt)
 				writeError(w, http.StatusForbidden, "key_not_allowed", "approve needs a rotation key")
 				return
 			case errors.Is(err, ErrDIDNotFound), errors.Is(err, ErrDIDUnusable):
 				h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("sign-in DID head not found")
-				h.spend(r, req.Nonce, jkt)
+				h.spend(ctx, req.Nonce, jkt)
 				writeError(w, http.StatusUnauthorized, "invalid_grant", err.Error())
 				return
 			default:
@@ -376,7 +384,7 @@ func (h *Handlers) Token() http.Handler {
 		// invalid_grant. A nonce is random and never reissued, so the record
 		// Consume returns is the one peeked and verified above, and the token
 		// is issued from it.
-		ch, err = h.Store.Consume(r.Context(), req.Nonce, jkt)
+		ch, err = h.Store.Consume(ctx, req.Nonce, jkt)
 		if err != nil {
 			h.challengeLookupFailed(w, err)
 			return
@@ -401,8 +409,8 @@ func (h *Handlers) Token() http.Handler {
 // spend consumes the challenge for a refused attempt by the key it names. The
 // refusal stands either way: if the store cannot consume it, the challenge
 // stays outstanding until it expires, which is logged.
-func (h *Handlers) spend(r *http.Request, n, jkt string) {
-	if _, err := h.Store.Consume(r.Context(), n, jkt); err != nil && !errors.Is(err, nonce.ErrNotFound) {
+func (h *Handlers) spend(ctx context.Context, n, jkt string) {
+	if _, err := h.Store.Consume(ctx, n, jkt); err != nil && !errors.Is(err, nonce.ErrNotFound) {
 		h.Log.Warn().Err(err).Msg("spending a refused challenge")
 	}
 }
