@@ -1153,3 +1153,36 @@ func TestRateLimitIPv6PerSlash64(t *testing.T) {
 	resp, body = postAs(t, ts.URL+"/challenge", "2001:db8:1:3::1", challenge)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "a different /64 has its own bucket: %v", body)
 }
+
+// R5-F1: the store budgets challenges per client address. One address asking
+// for more than nonce.MaxPerClient challenges displaces only its own oldest;
+// another address's challenge is untouched.
+func TestChallengeBudgetIsPerClient(t *testing.T) {
+	e := newTestEnv(t)
+	ts := e.limitedServer(t, 0)
+	req := map[string]any{"did": testDID, "scope": "read", "jkt": e.holder.Thumbprint()}
+	ask := func(ip string) string {
+		resp, body := postAs(t, ts.URL+"/challenge", ip, req)
+		require.Equal(t, http.StatusOK, resp.StatusCode, body)
+		return body["nonce"].(string)
+	}
+	outstanding := func(n string) bool {
+		_, err := e.handlers.Store.Peek(context.Background(), n)
+		return err == nil
+	}
+
+	other := ask("198.51.100.7")
+	var flood []string
+	for range nonce.MaxPerClient + 1 {
+		flood = append(flood, ask("203.0.113.1"))
+	}
+	assert.False(t, outstanding(flood[0]), "the flooding address's oldest challenge is displaced")
+	for _, n := range flood[1:] {
+		assert.True(t, outstanding(n))
+	}
+	assert.True(t, outstanding(other), "another address's challenge is untouched")
+
+	stored, err := e.handlers.Store.Peek(context.Background(), other)
+	require.NoError(t, err)
+	assert.Equal(t, "198.51.100.7", stored.Client)
+}

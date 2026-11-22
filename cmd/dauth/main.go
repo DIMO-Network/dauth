@@ -44,12 +44,15 @@ import (
 )
 
 // maxOutstandingChallenges bounds the in-memory nonce store. One challenge was
-// measured at about 1.3 KB held in the store. The chart limits the pod to
-// 256 MiB (values.yaml and values-prod.yaml), and the store may take about a
-// quarter of that: 64 MiB / 1.3 KB ≈ 51,600, so 50,000 challenges ≈ 65 MB
-// (62 MiB) when full. Full only happens under a challenge flood, where
-// rejecting new challenges is the right answer. Revisit this if the chart's
-// memory limit changes.
+// measured at about 1.3 KB held in the store; the per-client budget's links
+// add about 130 B (measured 791 B before and 920 B after on a typical
+// challenge), so about 1.45 KB. The chart limits the pod to 256 MiB
+// (values.yaml and values-prod.yaml), and 50,000 challenges ≈ 72 MB (69 MiB)
+// when full, a little over a quarter of that. Each client holds at most
+// nonce.MaxPerClient (32), so the store is only full under a flood from more
+// than about 1,560 addresses, and then a new challenge displaces the oldest
+// one of the address holding the most: the flood displaces its own challenges,
+// not honest clients'. Revisit this if the chart's memory limit changes.
 const maxOutstandingChallenges = 50_000
 
 // selfTokenTTL is the lifetime of the identity token dauth mints for itself

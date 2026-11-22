@@ -20,9 +20,18 @@ CREATE TABLE IF NOT EXISTS nonce_challenges (
     expires_at TIMESTAMPTZ NOT NULL,       -- absolute expiry; rows past this are swept
     audience   TEXT[],                     -- resolved `aud` (default applied), bound at challenge time
     scopes     TEXT[]      NOT NULL,       -- the token's scopes, bound at challenge time
-    jkt        TEXT        NOT NULL        -- thumbprint of the DPoP key the token is bound to
+    jkt        TEXT        NOT NULL,       -- thumbprint of the DPoP key the token is bound to
+    client_key TEXT        NOT NULL DEFAULT ''  -- rate-limit key of the client that asked; budgets rows per client
 );
+
+-- A table from before the per-client budget gains the column; its rows count
+-- as one client ('') until they expire.
+ALTER TABLE nonce_challenges ADD COLUMN IF NOT EXISTS client_key TEXT NOT NULL DEFAULT '';
 
 -- Supports the janitor's range delete of expired rows.
 CREATE INDEX IF NOT EXISTS nonce_challenges_expires_at_idx
     ON nonce_challenges (expires_at);
+
+-- Supports Put's trim of a client's oldest rows past its budget.
+CREATE INDEX IF NOT EXISTS nonce_challenges_client_key_idx
+    ON nonce_challenges (client_key, expires_at);

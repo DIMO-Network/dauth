@@ -201,7 +201,9 @@ func (h *Handlers) Challenge() http.Handler {
 
 		// The store is keyed by the nonce, which the client returns to /token.
 		// It keeps the resolved audience, so the token's aud is exactly what
-		// the challenge text names even if the default changes meanwhile.
+		// the challenge text names even if the default changes meanwhile. It
+		// budgets challenges per client, keyed as the rate limit keys them,
+		// so a flood from many addresses displaces only its own challenges.
 		if err := h.Store.Put(r.Context(), id, nonce.Challenge{
 			Message:   msg,
 			DID:       req.DID,
@@ -209,6 +211,7 @@ func (h *Handlers) Challenge() http.Handler {
 			Audience:  aud,
 			Scopes:    scopes,
 			JKT:       req.JKT,
+			Client:    httpmw.LimitKey(httpmw.RemoteIP(r)),
 		}); err != nil {
 			h.Log.Warn().Err(err).Msg("storing challenge")
 			writeError(w, http.StatusServiceUnavailable, "server_error", "challenge store unavailable, retry shortly")

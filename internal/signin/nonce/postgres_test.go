@@ -218,3 +218,86 @@ func TestPostgres_ConcurrentSchemaBootstrap(t *testing.T) {
 		}
 	}
 }
+
+// R5-F1: the Postgres store keeps the same per-client budget as the
+// in-memory one. A client past MaxPerClient loses its oldest challenge, and
+// other clients are untouched, so a flood cannot grow the table past
+// MaxPerClient rows per address.
+func TestPostgres_PerClientCapReplacesOldest(t *testing.T) {
+	ctx := context.Background()
+	p := newTestPostgres(t)
+	now := time.Now()
+	put := func(n, client string, at time.Time) {
+		t.Helper()
+		require.NoError(t, p.Put(ctx, n, Challenge{Scopes: []string{"read"}, JKT: "k",
+			Message: "m", DID: "did:dimo:0x01", ExpiresAt: at, Client: client,
+		}))
+	}
+	put("other", "198.51.100.7", now.Add(time.Minute))
+	for i := range MaxPerClient + 2 {
+		put(fmt.Sprintf("a%02d", i), "203.0.113.1", now.Add(time.Minute+time.Duration(i)*time.Millisecond))
+	}
+
+	for i := range MaxPerClient + 2 {
+		_, err := p.Peek(ctx, fmt.Sprintf("a%02d", i))
+		if i < 2 {
+			assert.ErrorIs(t, err, ErrNotFound, "a%02d: the client's oldest challenges are displaced", i)
+		} else {
+			assert.NoError(t, err, "a%02d", i)
+		}
+	}
+	got, err := p.Peek(ctx, "other")
+	require.NoError(t, err, "another client's challenge is untouched")
+	assert.Equal(t, "198.51.100.7", got.Client)
+
+	var rows int
+	require.NoError(t, p.db.QueryRow(ctx, `SELECT count(*) FROM nonce_challenges WHERE client_key = $1`, "203.0.113.1").Scan(&rows))
+	assert.Equal(t, MaxPerClient, rows)
+}
+
+// A table made before the per-client budget gains its column at startup and
+// keeps its rows.
+func TestPostgres_UpgradesTableWithoutClientColumn(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres challenge store tests")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	admin, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	name := fmt.Sprintf("upgrade_%d", time.Now().UnixNano())
+	_, err = admin.Exec(ctx, `CREATE SCHEMA `+name)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := admin.Exec(context.Background(), `DROP SCHEMA `+name+` CASCADE`)
+		assert.NoError(t, err)
+	})
+	cfg, err := pgxpool.ParseConfig(dsn)
+	require.NoError(t, err)
+	cfg.ConnConfig.RuntimeParams["search_path"] = name
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	_, err = pool.Exec(ctx, `CREATE TABLE nonce_challenges (
+		nonce TEXT PRIMARY KEY, message TEXT NOT NULL, did TEXT NOT NULL,
+		expires_at TIMESTAMPTZ NOT NULL, audience TEXT[], scopes TEXT[] NOT NULL, jkt TEXT NOT NULL)`)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `INSERT INTO nonce_challenges (nonce, message, did, expires_at, scopes, jkt)
+		VALUES ('before', 'm', 'did:dimo:0x01', now() + interval '1 minute', '{read}', 'k')`)
+	require.NoError(t, err)
+
+	p, err := NewPostgres(ctx, pool, zerolog.Nop())
+	require.NoError(t, err)
+	_, err = p.Peek(ctx, "before")
+	require.NoError(t, err, "an outstanding challenge survives the upgrade")
+	require.NoError(t, p.Put(ctx, "after", Challenge{Scopes: []string{"read"}, JKT: "k",
+		Message: "m", DID: "did:dimo:0x01", ExpiresAt: time.Now().Add(time.Minute), Client: "203.0.113.1",
+	}))
+	got, err := p.Peek(ctx, "after")
+	require.NoError(t, err)
+	assert.Equal(t, "203.0.113.1", got.Client)
+}

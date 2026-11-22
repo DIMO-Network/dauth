@@ -20,6 +20,15 @@ import (
 // three are reported identically so the response never reveals which.
 var ErrNotFound = errors.New("challenge not found, already used, or expired")
 
+// MaxPerClient is how many outstanding challenges one client (Challenge.Client)
+// may hold in either store; a new challenge past it replaces that client's
+// oldest. A sign-in redeems its challenge within seconds, so an honest client
+// rarely holds more than one or two; 32 leaves room for an office or carrier
+// NAT, or a server signing in for many users, behind one address. 1,000
+// flooding clients hold at most 32,000 challenges between them, which leaves
+// the in-memory store's 50,000 (cmd/dauth) room for everyone else.
+const MaxPerClient = 32
+
 // Challenge is the data dauth retains for an outstanding sign-in.
 type Challenge struct {
 	Message   string    // the challenge text the DID's key signs
@@ -35,6 +44,9 @@ type Challenge struct {
 	// challenge text names both, so the DID's signature covers them.
 	Scopes []string
 	JKT    string
+	// Client is the rate-limit key of the client that asked for the
+	// challenge (httpmw.LimitKey: an IPv4 address or an IPv6 /64).
+	Client string
 }
 
 // Store records and atomically consumes challenges, keyed by nonce. The

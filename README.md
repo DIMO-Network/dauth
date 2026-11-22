@@ -159,9 +159,16 @@ dauth's traffic arrives from) and the private ranges (the ingress); without
 that, every client shares one address and so one bucket. The limiter tracks
 at most 50,000 clients; when full it drops idle buckets first.
 
-The per-IP limit does not stop a distributed flood: many addresses can still
-fill the 50,000-challenge in-memory store between them. Before prod, add a
-Cloudflare or ingress rate-limit rule on `/signin/challenge` as well.
+The challenge store budgets by client as well, keyed the same way. One
+client holds at most 32 outstanding challenges, and a new one past that
+replaces its oldest. The in-memory store holds 50,000, so it fills only
+under a flood from more than about 1,560 addresses; then a new challenge
+replaces the oldest one of the client holding the most. A distributed flood
+thus displaces its own challenges, not honest clients'. The Postgres store
+keeps the same per-client budget. A client that starts more than 32 sign-ins
+from one address without finishing them loses the oldest, whose
+`/signin/token` then answers `invalid_grant`. A Cloudflare or ingress rule
+on `/signin/challenge` still helps against a flood's request load.
 
 ### Validation surface
 

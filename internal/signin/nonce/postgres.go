@@ -23,10 +23,12 @@ var schema string
 // same nonce: exactly one caller gets the row, every other gets ErrNotFound,
 // and a caller naming another key deletes nothing.
 //
-// There is no hard capacity cap here (the in-memory store's ErrFull guards a
-// process's heap). A flood of unredeemed challenges is bounded only by the
-// janitor sweeping expired rows and by any rate limit put in front of
-// /signin/challenge (none today); each row is small and short-lived.
+// There is no cap on the table as a whole, only per client: a client holds at
+// most MaxPerClient rows, and a new one replaces that client's oldest, as in
+// the in-memory store. A flood from many addresses therefore costs at most
+// MaxPerClient small rows per address, on top of dauth's per-address rate
+// limit on /signin/challenge (SIGNIN_RATE_LIMIT_PER_SECOND, per pod), and the
+// janitor sweeps what expires.
 type Postgres struct {
 	db  *pgxpool.Pool
 	now func() time.Time
@@ -71,14 +73,22 @@ func ensureSchema(ctx context.Context, db *pgxpool.Pool) error {
 	return tx.Commit(ctx)
 }
 
-// Put inserts ch under id. A duplicate nonce (astronomically unlikely for 32
-// random bytes) surfaces as an error and the handler reports the challenge
-// store unavailable.
+// Put inserts ch under id and, in the same statement, deletes the client's
+// oldest rows past its newest MaxPerClient-1, so with the new row the client
+// holds at most MaxPerClient. The delete sees the table as it was before the
+// statement, so concurrent Puts from one client can each keep their own row
+// and briefly leave it one over per concurrent call; the next Put trims it. A
+// duplicate nonce (astronomically unlikely for 32 random bytes) surfaces as an
+// error and the handler reports the challenge store unavailable.
 func (p *Postgres) Put(ctx context.Context, id string, ch Challenge) error {
 	_, err := p.db.Exec(ctx,
-		`INSERT INTO nonce_challenges (nonce, message, did, expires_at, audience, scopes, jkt)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		id, ch.Message, ch.DID, ch.ExpiresAt, ch.Audience, ch.Scopes, ch.JKT)
+		`WITH trimmed AS (
+		     DELETE FROM nonce_challenges WHERE nonce IN (
+		         SELECT nonce FROM nonce_challenges WHERE client_key = $8
+		         ORDER BY expires_at DESC, nonce DESC OFFSET $9))
+		 INSERT INTO nonce_challenges (nonce, message, did, expires_at, audience, scopes, jkt, client_key)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		id, ch.Message, ch.DID, ch.ExpiresAt, ch.Audience, ch.Scopes, ch.JKT, ch.Client, MaxPerClient-1)
 	if err != nil {
 		return fmt.Errorf("storing challenge: %w", err)
 	}
@@ -89,7 +99,7 @@ func (p *Postgres) Put(ctx context.Context, id string, ch Challenge) error {
 // ErrNotFound and is left for Consume or the janitor.
 func (p *Postgres) Peek(ctx context.Context, id string) (Challenge, error) {
 	ch, err := p.scan(p.db.QueryRow(ctx,
-		`SELECT message, did, expires_at, audience, scopes, jkt
+		`SELECT message, did, expires_at, audience, scopes, jkt, client_key
 		 FROM nonce_challenges WHERE nonce = $1`, id))
 	if err != nil {
 		return Challenge{}, fmt.Errorf("reading challenge: %w", err)
@@ -105,7 +115,7 @@ func (p *Postgres) Peek(ctx context.Context, id string) (Challenge, error) {
 func (p *Postgres) Consume(ctx context.Context, id, jkt string) (Challenge, error) {
 	ch, err := p.scan(p.db.QueryRow(ctx,
 		`DELETE FROM nonce_challenges WHERE nonce = $1 AND jkt = $2
-		 RETURNING message, did, expires_at, audience, scopes, jkt`, id, jkt))
+		 RETURNING message, did, expires_at, audience, scopes, jkt, client_key`, id, jkt))
 	if err != nil {
 		return Challenge{}, fmt.Errorf("consuming challenge: %w", err)
 	}
@@ -116,7 +126,7 @@ func (p *Postgres) Consume(ctx context.Context, id, jkt string) (Challenge, erro
 // ErrNotFound.
 func (p *Postgres) scan(row pgx.Row) (Challenge, error) {
 	var ch Challenge
-	err := row.Scan(&ch.Message, &ch.DID, &ch.ExpiresAt, &ch.Audience, &ch.Scopes, &ch.JKT)
+	err := row.Scan(&ch.Message, &ch.DID, &ch.ExpiresAt, &ch.Audience, &ch.Scopes, &ch.JKT, &ch.Client)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Challenge{}, ErrNotFound
