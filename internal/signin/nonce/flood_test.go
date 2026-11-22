@@ -14,6 +14,9 @@ import (
 // floodResult is one run of simulateFlood.
 type floodResult struct {
 	honest, ok int
+	// fullPuts counts challenges put while the store was already full, each
+	// of which displaced the oldest challenge of the heaviest client.
+	fullPuts int
 }
 
 func (r floodResult) share() float64 { return float64(r.ok) / float64(r.honest) }
@@ -53,6 +56,13 @@ func simulateFlood(t *testing.T, attackers, storeSize int, redeemAfter time.Dura
 		}
 		return id, m.Put(context.Background(), id, Challenge{ExpiresAt: now.Add(ttl), JKT: testJKT, Client: client})
 	}
+	var res floodResult
+	putCounted := func(client string) (string, error) {
+		if m.Len() >= storeSize {
+			res.fullPuts++
+		}
+		return put(client)
+	}
 
 	type attempt struct {
 		at     time.Time
@@ -65,7 +75,6 @@ func simulateFlood(t *testing.T, attackers, storeSize int, redeemAfter time.Dura
 	}
 	var attempts []attempt
 	var redemptions []redemption
-	var res floodResult
 	// The flood runs on past minute 10 until every honest sign-in started
 	// before it has redeemed or given up.
 	honestUntil := start.Add(10 * time.Minute)
@@ -73,7 +82,7 @@ func simulateFlood(t *testing.T, attackers, storeSize int, redeemAfter time.Dura
 	for step := 10 * time.Millisecond; now.Before(end); now = now.Add(step) {
 		for i, lim := range limiters {
 			if lim.AllowN(now, 1) {
-				_, _ = put(fmt.Sprintf("a%d", i))
+				_, _ = putCounted(fmt.Sprintf("a%d", i))
 			}
 		}
 		if now.After(start.Add(6*time.Minute)) && now.Before(honestUntil) && rng.Intn(5) == 0 {
@@ -90,7 +99,7 @@ func simulateFlood(t *testing.T, attackers, storeSize int, redeemAfter time.Dura
 				waiting = append(waiting, a)
 				continue
 			}
-			id, err := put(a.client)
+			id, err := putCounted(a.client)
 			switch {
 			case err == nil:
 				redemptions = append(redemptions, redemption{at: now.Add(redeemAfter), id: id})
@@ -118,15 +127,34 @@ func simulateFlood(t *testing.T, attackers, storeSize int, redeemAfter time.Dura
 // review measured, with 3 attempts each, 98% honest success at 34 attacking
 // client keys, 17% at 100 and 0% at 340 and 1,000. Honest sign-ins must keep
 // succeeding against up to 1,000 attacking keys.
+//
+// Against cmd/dauth's 50,000 the per-client budget alone holds a 1,000-key
+// flood (32,000 challenges) and the store never fills. The last row shrinks
+// the store below the flood's budget, so the store sits full and every new
+// challenge displaces the oldest one of the heaviest client.
 func TestMemoryFloodLeavesHonestSignInsWorking(t *testing.T) {
 	if testing.Short() {
 		t.Skip("simulates 10 minutes of a challenge flood")
 	}
-	const storeSize = 50_000 // cmd/dauth's maxOutstandingChallenges
-	for _, attackers := range []int{34, 100, 340, 1000} {
-		res := simulateFlood(t, attackers, storeSize, 10*time.Second)
-		t.Logf("attacker keys=%4d (%4d challenges/s): honest sign-ins that got a challenge within 3 attempts and redeemed it 10s later: %d/%d (%.0f%%)",
-			attackers, attackers*5, res.ok, res.honest, 100*res.share())
-		assert.GreaterOrEqual(t, res.share(), 0.99, "attacker keys=%d", attackers)
+	const shipped = 50_000 // cmd/dauth's maxOutstandingChallenges
+	for _, tc := range []struct {
+		attackers, storeSize int
+		full                 bool // whether the flood fills the store
+	}{
+		{34, shipped, false},
+		{100, shipped, false},
+		{340, shipped, false},
+		{1000, shipped, false},
+		{1000, 20_000, true},
+	} {
+		res := simulateFlood(t, tc.attackers, tc.storeSize, 10*time.Second)
+		t.Logf("attacker keys=%4d (%4d challenges/s), store %d: honest sign-ins that got a challenge within 3 attempts and redeemed it 10s later: %d/%d (%.0f%%); challenges put into a full store: %d",
+			tc.attackers, tc.attackers*5, tc.storeSize, res.ok, res.honest, 100*res.share(), res.fullPuts)
+		assert.GreaterOrEqual(t, res.share(), 0.99, "attacker keys=%d, store %d", tc.attackers, tc.storeSize)
+		if tc.full {
+			assert.Positive(t, res.fullPuts, "the flood must fill the store, so eviction from the heaviest client runs")
+		} else {
+			assert.Zero(t, res.fullPuts, "the per-client budget alone holds this flood")
+		}
 	}
 }
