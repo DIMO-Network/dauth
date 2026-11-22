@@ -28,12 +28,13 @@ CREATE TABLE IF NOT EXISTS nonce_challenges (
 -- as one client ('') until they expire. ALTER TABLE takes ACCESS EXCLUSIVE
 -- even when the column exists, queued behind every open transaction on the
 -- table and blocking every query after it, so it runs only when the column
--- is missing.
+-- is missing. IF NOT EXISTS stays on the ALTER in case two starts both see
+-- the column missing.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = current_schema()
                      AND table_name = 'nonce_challenges' AND column_name = 'client_key') THEN
-        ALTER TABLE nonce_challenges ADD COLUMN client_key TEXT NOT NULL DEFAULT '';
+        ALTER TABLE nonce_challenges ADD COLUMN IF NOT EXISTS client_key TEXT NOT NULL DEFAULT '';
     END IF;
 END $$;
 
