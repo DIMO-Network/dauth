@@ -165,7 +165,7 @@ func buildSignin(ctx context.Context, cfg config.Config, audiences []string, key
 		Domain:           cfg.Domain,
 		ChallengeTTL:     cfg.ChallengeTTL,
 		AllowedAudiences: audiences,
-		DPoP:             dpop.NewVerifier(),
+		DPoP:             newDPoPVerifier(),
 		TokenURL:         cfg.PublicBaseURL + "/signin/token",
 		Log:              log,
 	}
@@ -254,7 +254,7 @@ func buildExchange(cfg config.Config, ecfg exchange.Config, keys *keyset.KeySet,
 			HTTP:     &http.Client{Timeout: ecfg.OrgHostTimeout},
 		},
 		Assertions:  newAssertionVerifier(newDIDVerifier(cfg.DirectoryURL), exchangeURL),
-		DPoP:        dpop.NewVerifier(),
+		DPoP:        newDPoPVerifier(),
 		ExchangeURL: exchangeURL,
 		Log:         log,
 	}
@@ -357,4 +357,17 @@ func serveHTTP(ctx context.Context, srv *http.Server, log zerolog.Logger) error 
 		}
 		return nil
 	}
+}
+
+// dpopReplayEntries caps each surface's DPoP replay cache. did-directory's
+// default (dpop.DefaultMaxReplayEntries, 1,000,000 entries, about 157 MiB) is
+// more than dauth's 256Mi pod holds next to a full nonce store (about 72 MB),
+// so /signin and /exchange each keep at most this many unexpired proofs, about
+// 24 MiB apiece. A full cache refuses new proofs until entries expire.
+const dpopReplayEntries = 150_000
+
+func newDPoPVerifier() *dpop.Verifier {
+	v := dpop.NewVerifier()
+	v.MaxReplayEntries = dpopReplayEntries
+	return v
 }

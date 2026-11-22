@@ -17,6 +17,7 @@ import (
 
 	"github.com/DIMO-Network/dauth/internal/exchange"
 	"github.com/DIMO-Network/dauth/internal/keyset"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -119,4 +120,15 @@ func TestAssertionPathTraversalDIDNeverReachesDirectory(t *testing.T) {
 	assert.ErrorIs(t, err, exchange.ErrInvalidAssertion)
 	assert.NotErrorIs(t, err, exchange.ErrAssertionKeys)
 	assert.Zero(t, hits.Load(), "the directory must not be called")
+}
+
+// R7-F2 / R3-F6: did-directory's default replay cap (1,000,000 entries, about
+// 157 MiB) doesn't fit dauth's 256Mi pod next to the nonce store, so each
+// surface's DPoP verifier gets a smaller cap.
+func TestDPoPVerifierReplayCapFitsThePod(t *testing.T) {
+	v := newDPoPVerifier()
+	assert.Equal(t, dpopReplayEntries, v.MaxReplayEntries)
+	assert.Less(t, dpopReplayEntries, dpop.DefaultMaxReplayEntries)
+	// Two surfaces at roughly 160 bytes an entry stay under 64 MiB together.
+	assert.LessOrEqual(t, 2*dpopReplayEntries*160, 64<<20)
 }

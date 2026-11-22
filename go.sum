@@ -1,5 +1,5 @@
-github.com/DIMO-Network/did-directory v0.0.0-20261118235756-5933372ca981 h1:yya5JDU6InAcagFWNACNreN197KlPHn1Ep0WwmrEEqo=
-github.com/DIMO-Network/did-directory v0.0.0-20261118235756-5933372ca981/go.mod h1:/C2ZEmd8qxAgv5aMjzA9pW/Fbzij2Ng62N6LA/Z+KLU=
+github.com/DIMO-Network/did-directory v0.0.0-20261122185611-6dcff7b07ca5 h1:AdNw5VEN7YgZHdz/O3vVX8RVC+XXO8iHzNI3qIvFrXI=
+github.com/DIMO-Network/did-directory v0.0.0-20261122185611-6dcff7b07ca5/go.mod h1:DNHnyDyX7wARyz/AUONugbgASZCTbfbM1D7LrMCNNhw=
 github.com/MicahParks/jwkset v0.11.0 h1:yc0zG+jCvZpWgFDFmvs8/8jqqVBG9oyIbmBtmjOhoyQ=
 github.com/MicahParks/jwkset v0.11.0/go.mod h1:U2oRhRaLgDCLjtpGL2GseNKGmZtLs/3O7p+OZaL5vo0=
 github.com/MicahParks/keyfunc/v3 v3.8.0 h1:Hx2dgIjAXGk9slakM6rV9BOeaWDPEXXZ4Us8guNBfds=
