@@ -108,10 +108,12 @@ carries `DPoP: <proof>` for `POST <PUBLIC_BASE_URL>/signin/token` from the key
 the challenge named. An unknown, used or expired nonce is refused before the
 proof is checked, and so is a proof whose header `jwk` is not the named key:
 neither is verified, so neither records a `jti`, and neither (nor a missing
-proof) spends the challenge. Nor does a bad signature, an unknown key or a
-directory that does not answer: the signature is checked before the challenge
-is consumed, so only a request holding the named key with a signature that
-verifies consumes it, and of concurrent ones exactly one does. Returns
+proof, nor one that fails to verify) spends the challenge, so whoever has only
+the nonce cannot burn it. Once the proof verifies as the named key, the
+attempt counts: a bad signature, an unknown key, or a DID the directory does
+not hold or will not serve spends the challenge, and the client starts again
+with a new one. A directory that does not answer spends nothing. Of concurrent
+requests that verify, exactly one gets the token. Returns
 `{ token, token_type: "DPoP", expires_in, scope }`: `TOKEN_TTL`, or
 `APPROVE_TOKEN_TTL` when the scope includes `approve`. Errors are OAuth-style
 `{ error, error_description }`: `invalid_request` (400), `invalid_dpop_proof`

@@ -278,11 +278,15 @@ func (h *Handlers) Token() http.Handler {
 		// stops here: its proof is never verified, so its jti is never
 		// recorded. All three surface identically as invalid_grant.
 		//
-		// Nothing spends the challenge until the signature has verified. A
-		// refused proof, a bad signature or an unknown key (400 or 401) and a
-		// directory that did not answer (503) all leave it outstanding, so the
-		// client may retry /token with the same signature and a fresh DPoP
-		// proof (a verified proof's jti is recorded, so the old one is spent).
+		// A refused or unverifiable proof (400) and anything that could not
+		// be answered (503: the directory, the store, a proof that could not
+		// be checked) leave the challenge outstanding, so the client may retry
+		// /token with the same signature and a fresh DPoP proof (a verified
+		// proof's jti is recorded, so the old one is spent). Whoever has only
+		// the nonce therefore cannot burn it. Once the proof has verified as
+		// the challenge's own key, the attempt is the key holder's, and a
+		// refusal (401 or 403) spends the challenge: each challenge buys one
+		// verified proof and one directory resolve, not one per attempt.
 		ch, err := h.Store.Peek(r.Context(), req.Nonce)
 		if err != nil {
 			h.challengeLookupFailed(w, err)
@@ -328,10 +332,12 @@ func (h *Handlers) Token() http.Handler {
 			return
 		case errors.Is(err, ErrDIDNotFound), errors.Is(err, ErrDIDUnusable), errors.Is(err, ErrNoSuchKey):
 			h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("sign-in key not found")
+			h.spend(r, req.Nonce, jkt)
 			writeError(w, http.StatusUnauthorized, "invalid_grant", err.Error())
 			return
 		default:
 			h.Log.Warn().Err(err).Str("did", ch.DID).Str("remote", httpmw.RemoteIP(r)).Msg("invalid signature")
+			h.spend(r, req.Nonce, jkt)
 			writeError(w, http.StatusUnauthorized, "invalid_grant", "signature does not verify against the DID's key")
 			return
 		}
@@ -362,6 +368,15 @@ func (h *Handlers) Token() http.Handler {
 			Scope:     identity.FormatScope(ch.Scopes),
 		})
 	})
+}
+
+// spend consumes the challenge for a refused attempt by the key it names. The
+// refusal stands either way: if the store cannot consume it, the challenge
+// stays outstanding until it expires, which is logged.
+func (h *Handlers) spend(r *http.Request, n, jkt string) {
+	if _, err := h.Store.Consume(r.Context(), n, jkt); err != nil && !errors.Is(err, nonce.ErrNotFound) {
+		h.Log.Warn().Err(err).Msg("spending a refused challenge")
+	}
 }
 
 // proofFailed answers a DPoP Verify error. Every proof failure wraps

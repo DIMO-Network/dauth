@@ -49,9 +49,12 @@ const (
 type fakeDirectory struct {
 	docs map[string][]VerificationMethod
 	err  error
+	// resolves counts VerificationMethods calls.
+	resolves atomic.Int32
 }
 
 func (d *fakeDirectory) VerificationMethods(_ context.Context, did string) ([]VerificationMethod, error) {
+	d.resolves.Add(1)
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -716,29 +719,66 @@ func TestTokenDirectoryOutageLeavesChallenge(t *testing.T) {
 	assert.Equal(t, "invalid_grant", body["error"], "a redeemed challenge is spent")
 }
 
-// A bad signature or an unknown key is refused without spending the
-// challenge, so the right signature still redeems it.
-func TestTokenBadSignatureLeavesChallenge(t *testing.T) {
+// R5-F7: a failed attempt from the challenge's own key spends the challenge.
+// A request that holds the named key but brings a bad signature, an unknown
+// or forbidden key, or a DID the directory does not hold is refused and the
+// challenge is consumed, so the right signature cannot redeem it afterwards:
+// one challenge buys one verified proof and one directory resolve, not one per
+// attempt.
+func TestTokenFailedAttemptSpendsChallenge(t *testing.T) {
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		did  string
+		// failing is the refused /token body for the challenge msg with nonce n.
+		failing func(e *testEnv, msg, n string) map[string]any
+	}{
+		{"another key's signature", testDID, func(_ *testEnv, msg, n string) map[string]any {
+			return map[string]any{"nonce": n, "signature": sign(t, other, msg)}
+		}},
+		{"signature over another message", testDID, func(e *testEnv, msg, n string) map[string]any {
+			return map[string]any{"nonce": n, "signature": sign(t, e.priv, msg+" ")}
+		}},
+		{"unknown verification method", testDID, func(e *testEnv, msg, n string) map[string]any {
+			return map[string]any{"nonce": n, "signature": sign(t, e.priv, msg), "key": "other"}
+		}},
+		{"the org commit key", testDID, func(e *testEnv, msg, n string) map[string]any {
+			return map[string]any{"nonce": n, "signature": sign(t, e.priv, msg), "key": "dimo_org"}
+		}},
+		{"a DID the directory does not hold", "did:dimo:nobody", func(e *testEnv, msg, n string) map[string]any {
+			return map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			msg, n := e.challenge(t, tc.did)
+			status, body := e.redeem(t, e.holder, tc.failing(e, msg, n))
+			require.Equal(t, http.StatusUnauthorized, status, body)
+			require.Equal(t, "invalid_grant", body["error"])
+			_, err := e.handlers.Store.Peek(context.Background(), n)
+			require.ErrorIs(t, err, nonce.ErrNotFound, "a failed attempt spends the challenge")
+
+			status, body = e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
+			assert.Equal(t, http.StatusUnauthorized, status, body)
+			assert.Equal(t, "invalid_grant", body["error"], "the right signature cannot redeem a spent challenge")
+		})
+	}
+}
+
+// Repeated bad signatures on one challenge cost one directory resolve: the
+// first spends the challenge, and the rest stop at the store.
+func TestTokenBadSignaturesResolveOnce(t *testing.T) {
 	e := newTestEnv(t)
 	msg, n := e.challenge(t, testDID)
 	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-
-	for name, req := range map[string]map[string]any{
-		"another key's signature":        {"nonce": n, "signature": sign(t, other, msg)},
-		"signature over another message": {"nonce": n, "signature": sign(t, e.priv, msg+" ")},
-		"unknown verification method":    {"nonce": n, "signature": sign(t, e.priv, msg), "key": "other"},
-		"the org commit key":             {"nonce": n, "signature": sign(t, e.priv, msg), "key": "dimo_org"},
-	} {
-		status, body := e.redeem(t, e.holder, req)
-		require.Equal(t, http.StatusUnauthorized, status, "%s: %v", name, body)
-		require.Equal(t, "invalid_grant", body["error"], name)
-		_, err := e.handlers.Store.Peek(context.Background(), n)
-		require.NoError(t, err, "%s must not spend the challenge", name)
+	for range 5 {
+		status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, other, msg)})
+		require.Equal(t, http.StatusUnauthorized, status, body)
 	}
-
-	status, body := e.redeem(t, e.holder, map[string]any{"nonce": n, "signature": sign(t, e.priv, msg)})
-	assert.Equal(t, http.StatusOK, status, body)
+	assert.EqualValues(t, 1, e.directory.resolves.Load())
 }
 
 // failingDPoP refuses every proof with err.
