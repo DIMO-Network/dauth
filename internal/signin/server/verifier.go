@@ -170,8 +170,8 @@ func (v *Verifier) VerifyMethod(ctx context.Context, did, fragment string, data 
 }
 
 // IsRotationKey reports whether didKey is one of the rotation keys of did's
-// head. Keys are compared decoded, so two encodings of one key match. Errors
-// are the Directory's.
+// head. Keys are compared as decoded and re-encoded did:keys, so a rotation
+// key that does not decode matches nothing. Errors are the Directory's.
 func (v *Verifier) IsRotationKey(ctx context.Context, did, didKey string) (bool, error) {
 	want, err := didkey.Decode(didKey)
 	if err != nil {
