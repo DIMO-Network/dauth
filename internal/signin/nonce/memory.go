@@ -33,11 +33,16 @@ type client struct {
 // (Challenge.Client) rather than by arrival. A client holds at most
 // MaxPerClient challenges: a new one replaces that client's oldest. When the
 // store is full, a new challenge replaces the oldest one of whichever client
-// holds the most. Put never refuses, and a flood only ever displaces the
-// flooders' own challenges: an honest client holding one or two outstanding
-// challenges is never the heaviest while any flooding client holds more. The
-// 2026-11-22 review's simulation (flood_test.go) runs this against up to
-// 1,000 flooding clients.
+// holds the most, so Put never refuses. Fewer than maxEntries/MaxPerClient
+// flooding clients (about 1,560 for cmd/dauth's 50,000) cannot fill the
+// store, and then the only challenge displaced is a client's own oldest past
+// its budget. Above that, the heaviest client loses first. That is a flooder
+// while flooders hold more than anyone else, but a flood spread thin enough
+// leaves each flooding client few challenges, and an address many honest
+// users share (a carrier or office NAT, a server signing in for others) can
+// then be the heaviest and lose its oldest. The 2026-11-22 review's
+// simulation (flood_test.go) runs this against up to 1,000 flooding clients,
+// including a store small enough for them to fill.
 type Memory struct {
 	mu      sync.Mutex
 	entries map[string]*entry

@@ -49,10 +49,12 @@ import (
 // challenge), so about 1.45 KB. The chart limits the pod to 256 MiB
 // (values.yaml and values-prod.yaml), and 50,000 challenges ≈ 72 MB (69 MiB)
 // when full, a little over a quarter of that. Each client holds at most
-// nonce.MaxPerClient (32), so the store is only full under a flood from more
-// than about 1,560 addresses, and then a new challenge displaces the oldest
-// one of the address holding the most: the flood displaces its own challenges,
-// not honest clients'. Revisit this if the chart's memory limit changes.
+// nonce.MaxPerClient (32), so a flood from fewer than about 1,560 addresses
+// (50,000 / 32) cannot fill the store. Above that, a new challenge displaces
+// the oldest one of the address holding the most: usually a flooding
+// address, but once a flood is spread thin, an address many users share (a
+// NAT) can hold the most and lose first. Revisit this if the chart's memory
+// limit changes.
 const maxOutstandingChallenges = 50_000
 
 // selfTokenTTL is the lifetime of the identity token dauth mints for itself

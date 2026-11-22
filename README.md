@@ -172,14 +172,22 @@ at most 50,000 clients; when full it drops idle buckets first.
 
 The challenge store budgets by client as well, keyed the same way. One
 client holds at most 32 outstanding challenges, and a new one past that
-replaces its oldest. The in-memory store holds 50,000, so it fills only
-under a flood from more than about 1,560 addresses; then a new challenge
-replaces the oldest one of the client holding the most. A distributed flood
-thus displaces its own challenges, not honest clients'. The Postgres store
-keeps the same per-client budget. A client that starts more than 32 sign-ins
-from one address without finishing them loses the oldest, whose
-`/signin/token` then answers `invalid_grant`. A Cloudflare or ingress rule
-on `/signin/challenge` still helps against a flood's request load.
+replaces its oldest. The in-memory store holds 50,000, so a flood from fewer
+than about 1,560 addresses (50,000 / 32) cannot fill it and displaces only
+its own challenges. Above that, a new challenge replaces the oldest one of
+the client holding the most. That is usually a flooding address, but once a
+flood is spread thin enough, an address many users share (a carrier or
+office NAT, a server signing in for others) can hold the most and lose its
+oldest first. The Postgres store keeps the same per-client budget and has no
+overall cap. A client that starts more than 32 sign-ins from one address
+without finishing them loses the oldest, whose `/signin/token` then answers
+`invalid_grant`.
+
+Before prod, add a Cloudflare or ingress rate-limit rule on
+`/signin/challenge` as well. The budget keeps honest challenges in the
+store, but it does not limit request load: every challenge can still be
+taken to `/signin/token` once, and each attempt there costs a verified DPoP
+proof and a directory resolve.
 
 ### Validation surface
 
