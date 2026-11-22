@@ -301,3 +301,48 @@ func TestPostgres_UpgradesTableWithoutClientColumn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "203.0.113.1", got.Client)
 }
+
+// A replica starting while others serve must not lock the table: once the
+// schema is current, bootstrap takes no lock that waits for readers (ALTER
+// TABLE would take ACCESS EXCLUSIVE, queued behind every open transaction
+// that has touched the table, with every later query queued behind it).
+func TestPostgres_StartupDoesNotWaitForReaders(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres challenge store tests")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	admin, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	name := fmt.Sprintf("startup_%d", time.Now().UnixNano())
+	_, err = admin.Exec(ctx, `CREATE SCHEMA `+name)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := admin.Exec(context.Background(), `DROP SCHEMA `+name+` CASCADE`)
+		assert.NoError(t, err)
+	})
+	cfg, err := pgxpool.ParseConfig(dsn)
+	require.NoError(t, err)
+	cfg.ConnConfig.RuntimeParams["search_path"] = name
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	_, err = NewPostgres(ctx, pool, zerolog.Nop())
+	require.NoError(t, err)
+
+	// Another replica's request is mid-transaction on the table.
+	reader, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Rollback(context.Background()) })
+	_, err = reader.Exec(ctx, `SELECT count(*) FROM nonce_challenges`)
+	require.NoError(t, err)
+
+	startCtx, stop := context.WithTimeout(ctx, 3*time.Second)
+	defer stop()
+	_, err = NewPostgres(startCtx, pool, zerolog.Nop())
+	assert.NoError(t, err, "bootstrap must not wait for the open reader")
+}
