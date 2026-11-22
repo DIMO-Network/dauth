@@ -372,6 +372,10 @@ To rotate a surface's key:
 4. Wait at least the surface's longest token lifetime (`TOKEN_TTL` for
    `/signin`), so no token from the old key is still valid, then remove the
    old key and deploy.
+5. After a removal, refresh or restart every verifier that caches the JWKS
+   (the org host refetches every 5 minutes; accounts and other relying
+   parties follow their own cache). A removed key keeps verifying wherever a
+   cache still holds it, so for a compromised key, restart them all at once.
 
 ```
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing.pem
