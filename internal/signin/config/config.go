@@ -21,7 +21,9 @@ type Config struct {
 
 	// HTTP servers. One public listener serves both the /signin and /exchange
 	// surfaces; the ops listener serves probes + Prometheus. TLS terminates at
-	// the ingress. There is no rate limit in dauth or in the chart's ingress.
+	// the ingress, which sets no rate limit; dauth limits the /signin POSTs
+	// per client IP itself (RateLimitPerSecond) and budgets outstanding
+	// challenges per client (nonce.MaxPerClient).
 	HTTPAddr string // HTTP_ADDRESS — public server (both prefixes)
 	OpsAddr  string // OPS_ADDRESS  — probes + Prometheus
 
