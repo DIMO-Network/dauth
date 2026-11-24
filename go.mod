@@ -3,7 +3,7 @@ module github.com/DIMO-Network/dauth
 go 1.27
 
 require (
-	github.com/DIMO-Network/did-directory v0.0.0-20261122185611-6dcff7b07ca5
+	github.com/DIMO-Network/did-directory v0.0.0-20261124035835-24bcf86e65f8
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
