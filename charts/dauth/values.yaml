@@ -2,11 +2,8 @@ replicaCount: 1
 image:
   repository: dimozone/dauth
   pullPolicy: IfNotPresent
-  # Dev: CI (buildpushdev.yml) writes the 7-character SHA of the latest main
-  # image to tag, and edits nothing else. Empty falls back to Chart.appVersion.
-  # Prod sets requireTag, so an empty tag fails the render.
   requireTag: false
-  tag: 52f18e8
+  tag: a3e700c
 imagePullSecrets: []
 nameOverride: ''
 fullnameOverride: ''
@@ -34,16 +31,8 @@ env:
   DIRECTORY_URL: http://did-directory-dev:8080
   SIGNIN_ISSUER: https://dauth.dev.dimo.zone/signin
   JWT_AUDIENCE: dimo
-  # Must equal accounts' ACCOUNTS_PUBLIC_URL exactly.
   SIGNIN_ALLOWED_AUDIENCES: https://accounts.dev.dimo.org
-  # Browser origins allowed to call /signin (login and console).
   SIGNIN_CORS_ORIGINS: https://login.dev.dimo.org,https://console-staging.dimo.org
-  # Peers whose X-Forwarded-For names the client, for the /signin rate limit
-  # (SIGNIN_RATE_LIMIT_PER_SECOND, default 5 a second per IP): loopback, which
-  # is the Linkerd sidecar dauth's own traffic arrives from, and the private
-  # ranges the ingress controller's pods sit in. Without them every client
-  # would share the sidecar's or ingress pod's address, and so one limit.
-  # values-prod.yaml inherits this.
   SIGNIN_TRUSTED_PROXIES: 127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
   CHALLENGE_TTL: 5m
   EXCHANGE_ISSUER: https://dauth.dev.dimo.zone/exchange
@@ -53,8 +42,6 @@ env:
   ENABLE_PPROF: 'false'
 postgres:
   enabled: false
-# When true, rendering fails unless env.ORG_HOST_URL and env.DAUTH_DID are set
-# to real values (no REPLACE_WITH placeholder). values-prod.yaml turns it on.
 requireExchangeConfig: false
 ports:
   - name: http
