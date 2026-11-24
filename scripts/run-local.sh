@@ -27,6 +27,8 @@ export PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://localhost:8080}"
 export DIRECTORY_URL="${DIRECTORY_URL:-http://localhost:8082}"
 export SIGNIN_ISSUER="${SIGNIN_ISSUER:-http://localhost:8080/signin}"
 export JWT_AUDIENCE="${JWT_AUDIENCE:-dimo}"
+# Browser origins allowed to call /signin, e.g. a local login app:
+# export SIGNIN_CORS_ORIGINS=http://localhost:3000
 export SIGNIN_SIGNING_KEY_1="$(cat "$keys_dir/signin.pem")"
 export EXCHANGE_ISSUER="${EXCHANGE_ISSUER:-http://localhost:8080/exchange}"
 export EXCHANGE_SIGNING_KEY_1="$(cat "$keys_dir/exchange.pem")"

@@ -108,3 +108,119 @@ func TestLoad_MultipleAudiences(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"dimo", "https://din.dimo.zone"}, s.Audience)
 }
+
+func TestLoadRejectsBadTTLs(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"zero challenge":  {"CHALLENGE_TTL": "0s"},
+		"negative token":  {"TOKEN_TTL": "-1m"},
+		"zero approve":    {"APPROVE_TOKEN_TTL": "0s"},
+		"approve > token": {"TOKEN_TTL": "1m", "APPROVE_TOKEN_TTL": "2m"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setMinimalEnv(t)
+			for k, v := range env {
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoadReadsCORSOrigins(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("SIGNIN_CORS_ORIGINS", "https://login.dimo.org, https://console.dimo.org")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://login.dimo.org", "https://console.dimo.org"}, cfg.CORSOrigins)
+}
+
+func TestLoadApproveTTLDefaultFollowsShortTokenTTL(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("TOKEN_TTL", "2m")
+	cfg, err := Load()
+	require.NoError(t, err, "setting only a short TOKEN_TTL must not break startup")
+	assert.Equal(t, 2*time.Minute, cfg.ApproveTTL)
+
+	t.Setenv("TOKEN_TTL", "1h")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute, cfg.ApproveTTL, "the default stays 5m under a longer TOKEN_TTL")
+
+	t.Setenv("TOKEN_TTL", "2m")
+	t.Setenv("APPROVE_TOKEN_TTL", "3m")
+	_, err = Load()
+	require.Error(t, err, "an explicit APPROVE_TOKEN_TTL above TOKEN_TTL is still refused")
+	assert.Contains(t, err.Error(), "APPROVE_TOKEN_TTL")
+}
+
+func TestLoadValidatesCORSOrigins(t *testing.T) {
+	for _, ok := range []string{"https://login.dimo.org", "http://localhost:3000", "capacitor://localhost", "https://[::1]:8443", "https://login.dimo.org:8443", "http://localhost:443"} {
+		setMinimalEnv(t)
+		t.Setenv("SIGNIN_CORS_ORIGINS", ok)
+		_, err := Load()
+		assert.NoError(t, err, ok)
+	}
+	for _, bad := range []string{
+		"https://login.dimo.org/", "https://login.dimo.org/path", "https://Login.dimo.org", "HTTPS://login.dimo.org",
+		"*", "https://*.dimo.org", "login.dimo.org", "https://login.dimo.org?x=1", "https://login.dimo.org#f",
+		"https://user@login.dimo.org", "https://login.dimo.org:443", "http://localhost:80",
+	} {
+		setMinimalEnv(t)
+		t.Setenv("SIGNIN_CORS_ORIGINS", "https://console.dimo.org,"+bad)
+		_, err := Load()
+		require.Error(t, err, bad)
+		assert.Contains(t, err.Error(), "SIGNIN_CORS_ORIGINS", bad)
+		assert.Contains(t, err.Error(), bad)
+	}
+}
+
+func TestLoadRejectsTrailingSlashAudience(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("SIGNIN_ALLOWED_AUDIENCES", "https://accounts.dimo.org,https://other.dimo.org/")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SIGNIN_ALLOWED_AUDIENCES")
+	assert.Contains(t, err.Error(), "https://other.dimo.org/")
+
+	t.Setenv("SIGNIN_ALLOWED_AUDIENCES", "https://accounts.dimo.org,https://other.dimo.org")
+	_, err = Load()
+	assert.NoError(t, err)
+}
+
+func TestLoadRateLimit(t *testing.T) {
+	setMinimalEnv(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 5, cfg.RateLimitPerSecond, "default")
+
+	t.Setenv("SIGNIN_RATE_LIMIT_PER_SECOND", "0")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Zero(t, cfg.RateLimitPerSecond, "0 disables")
+
+	for _, bad := range []string{"-1", "five", "2.5"} {
+		t.Setenv("SIGNIN_RATE_LIMIT_PER_SECOND", bad)
+		_, err = Load()
+		assert.Error(t, err, bad)
+	}
+}
+
+func TestLoadTrustedProxies(t *testing.T) {
+	setMinimalEnv(t)
+	t.Setenv("SIGNIN_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.7, fd00::/8, 172.16.5.9/12")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.0/8", "192.168.1.7/32", "fd00::/8", "172.16.0.0/12"}, func() []string {
+		var out []string
+		for _, p := range cfg.TrustedProxies {
+			out = append(out, p.String())
+		}
+		return out
+	}())
+
+	t.Setenv("SIGNIN_TRUSTED_PROXIES", "10.0.0.0/8,not-an-ip")
+	_, err = Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not-an-ip")
+}

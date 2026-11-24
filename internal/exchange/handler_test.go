@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -148,6 +149,7 @@ func (f *fakeHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type env struct {
 	ts          *httptest.Server
+	handler     *Handler
 	host        *fakeHost
 	hostSrv     *httptest.Server
 	signin      *token.Issuer
@@ -203,7 +205,7 @@ func newEnv(t *testing.T) *env {
 
 	key, err := dpop.GenerateKey()
 	require.NoError(t, err)
-	return &env{ts: ts, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, keys: keys, now: now}
+	return &env{ts: ts, handler: h, host: host, hostSrv: hostSrv, signin: signin, exchangePub: exchangePub, key: key, keys: keys, now: now}
 }
 
 // identity is did's identity token addressed to the exchange, with the read
@@ -223,6 +225,9 @@ func (e *env) issue(t *testing.T, req token.Request) string {
 	if req.JKT == "" {
 		req.JKT = e.key.Thumbprint()
 	}
+	if req.VM == "" {
+		req.VM = "signing"
+	}
 	tok, _, err := e.signin.Issue(req)
 	require.NoError(t, err)
 	return tok
@@ -231,6 +236,13 @@ func (e *env) issue(t *testing.T, req token.Request) string {
 // exchange posts body with the identity token and a fresh proof (or none
 // when proof is false).
 func (e *env) exchange(t *testing.T, identity string, proof bool, body any) (int, map[string]any) {
+	t.Helper()
+	resp, out := e.exchangeResponse(t, identity, proof, body)
+	return resp.StatusCode, out
+}
+
+// exchangeResponse is exchange returning the whole response, for its headers.
+func (e *env) exchangeResponse(t *testing.T, identity string, proof bool, body any) (*http.Response, map[string]any) {
 	t.Helper()
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
@@ -252,7 +264,7 @@ func (e *env) exchange(t *testing.T, identity string, proof bool, body any) (int
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(data, &out), string(data))
-	return resp.StatusCode, out
+	return resp, out
 }
 
 func (e *env) parse(t *testing.T, signed string) *tokenclaims.Token {
@@ -374,7 +386,7 @@ func TestExchangeRefusals(t *testing.T) {
 	t.Run("identity token from another issuer", func(t *testing.T) {
 		otherKeys, _ := newKeySet(t)
 		other := token.NewIssuer(token.Config{Keys: otherKeys, Issuer: signinIssuer, Audience: []string{"dimo"}, TTL: time.Hour})
-		tok, _, err := other.Issue(token.Request{DID: callerDID, Audience: []string{exchangeURL}, Scopes: []string{"read"}, JKT: e.key.Thumbprint()})
+		tok, _, err := other.Issue(token.Request{DID: callerDID, Audience: []string{exchangeURL}, Scopes: []string{"read"}, JKT: e.key.Thumbprint(), VM: "signing"})
 		require.NoError(t, err)
 		status, body := e.exchange(t, tok, true, request)
 		assert.Equal(t, http.StatusUnauthorized, status, body)
@@ -479,6 +491,46 @@ func TestExchangeRefusals(t *testing.T) {
 	})
 }
 
+// failingDPoP refuses every proof with err.
+type failingDPoP struct{ err error }
+
+func (f failingDPoP) Verify(string, string, string, string) (string, error) { return "", f.err }
+
+// A DPoP error that does not wrap dpop.ErrInvalid means the proof could not be
+// checked (a full replay cache, once did-directory's ErrReplayCacheFull
+// arrives), not that it is bad: 503 with Retry-After, and the host is not
+// asked. An ErrInvalid failure is still 400 invalid_dpop_proof.
+func TestExchangeUncheckableProofIs503(t *testing.T) {
+	e := newEnv(t)
+	identity := e.identity(t, callerDID)
+	e.handler.DPoP = failingDPoP{err: errors.New("DPoP replay cache full")}
+
+	raw, err := json.Marshal(request)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, e.ts.URL+"/exchange", bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "DPoP "+identity)
+	proof, err := e.key.Proof(http.MethodPost, exchangeURL, identity, time.Now())
+	require.NoError(t, err)
+	req.Header.Set(dpop.HeaderName, proof)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, body)
+	assert.Equal(t, "1", resp.Header.Get("Retry-After"))
+	assert.Equal(t, "server_error", body["error"])
+	assert.Empty(t, e.host.requests, "the host is not asked when the proof could not be checked")
+
+	e.handler.DPoP = failingDPoP{err: fmt.Errorf("%w: proof replayed", dpop.ErrInvalid)}
+	status, out := e.exchange(t, identity, true, request)
+	assert.Equal(t, http.StatusBadRequest, status, out)
+	assert.Equal(t, "invalid_dpop_proof", out["error"])
+	assert.Empty(t, e.host.requests)
+}
+
 func TestExchangeClientAssertion(t *testing.T) {
 	e := newEnv(t)
 	e.host.body = map[string]any{"vehicle": vehicleDID, "live": []string{"command:unlock"}, "chain": []string{grantURI}, "at": e.now}
@@ -557,8 +609,9 @@ func TestExchangeClientAssertion(t *testing.T) {
 		e.keys.down = true
 		e.keys.mu.Unlock()
 		defer func() { e.keys.mu.Lock(); e.keys.down = false; e.keys.mu.Unlock() }()
-		status, resp := e.exchange(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
-		assert.Equal(t, http.StatusServiceUnavailable, status, resp)
+		resp, body := e.exchangeResponse(t, identity, true, with(fleetApp.assertion(t, jkt, nil)))
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, body)
+		assert.Equal(t, "1", resp.Header.Get("Retry-After"), "the app's DID could not be resolved: retry shortly")
 	})
 
 	t.Run("the host refuses a client the allowlist does not name", func(t *testing.T) {

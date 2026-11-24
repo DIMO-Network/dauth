@@ -1,33 +1,37 @@
+image:
+  # Empty on purpose: prod fails to render until a PR promotes a SHA that is
+  # already running in dev (see README.md). It must not inherit values.yaml's
+  # tag, which CI rewrites on every push to main.
+  tag: ""
+  requireTag: true
 env:
   ENVIRONMENT: prod
   LOG_LEVEL: info
   HTTP_ADDRESS: "0.0.0.0:8080"
   OPS_ADDRESS: "0.0.0.0:8081"
   PUBLIC_BASE_URL: https://dauth.dimo.zone
-  # --- sign-in surface (/siwe) ---
-  SIWE_ISSUER: https://dauth.dimo.zone/siwe
+  # --- sign-in surface (/signin) ---
+  SIGNIN_ISSUER: https://dauth.dimo.zone/signin
+  DIRECTORY_URL: http://did-directory-prod:8080
   JWT_AUDIENCE: dimo
-  SIWE_STATEMENT: "Sign in to DIMO."
-  CHAIN_ID: "137"
+  # Must equal accounts' ACCOUNTS_PUBLIC_URL exactly.
+  SIGNIN_ALLOWED_AUDIENCES: https://accounts.dimo.org
+  # Browser origins allowed to call /signin (login and console).
+  SIGNIN_CORS_ORIGINS: https://login.dimo.org,https://console.dimo.org
   CHALLENGE_TTL: 5m
-  TOKEN_TTL: 1h
-  ALLOWABLE_TIME_SKEW: 5m
-  RATE_LIMIT_RPS: "50"
-  RATE_LIMIT_BURST: "100"
   # --- Exchange surface (/exchange) ---
   EXCHANGE_ISSUER: https://dauth.dimo.zone/exchange
-  TOKEN_EXPIRATION: 10m
-  GRPC_PORT: "8086"
+  # Prod's org host and dauth DID are not known yet. null deletes the dev values
+  # this file would otherwise inherit from values.yaml (org-host-dev and the
+  # REPLACE_WITH placeholder), and requireExchangeConfig below makes rendering
+  # fail until both are set here. EXCHANGE_AUDIENCE inherits dev's dq, which
+  # is also the code default.
+  ORG_HOST_URL: null
+  DAUTH_DID: null
   ENABLE_PPROF: "false"
-  USERS_API_GRPC_ADDRESS: users-api-prod:8086
-  CONTRACT_ADDRESS_SACD: "0x3c152B5d96769661008Ff404224d6530FCAC766d"
-  CONTRACT_ADDRESS_TEMPLATE: "0xbfc07085736426295f60baa15dc70743e98fe612"
-  CONTRACT_ADDRESS_MANUFACTURER: "0x3b07e2A2ABdd0A9B8F7878bdE6487c502164B9dd"
-  CONTRACT_ADDRESS_VEHICLE: "0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF"
-  IDENTITY_URL: http://identity-api-prod:8080/query
-  IPFS_BASE_URL: https://assets.dimo.xyz/ipfs
-  IPFS_TIMEOUT: 30s
-  DIMO_REGISTRY_CHAIN_ID: "137"
+
+# Fail rendering unless env.ORG_HOST_URL and env.DAUTH_DID are real values.
+requireExchangeConfig: true
 
 # Postgres-backed challenge store. When enabled, raise replicaCount above 1 and
 # provision the dauth/database_url secret (a postgres:// connection URL) in AWS

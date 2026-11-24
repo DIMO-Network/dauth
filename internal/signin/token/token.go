@@ -21,11 +21,18 @@ import (
 )
 
 // Claims is the identity-token claim set: the registered claims, with sub the
-// signed-in DID, plus scope and the key binding.
+// signed-in DID, plus scope, the key binding and the verification method that
+// signed in.
 type Claims struct {
 	jwt.RegisteredClaims
 	Scope string                 `json:"scope"`
 	Cnf   *identity.Confirmation `json:"cnf"`
+	// VM is the fragment, without '#', of the DID's verification method
+	// that signed the sign-in challenge (e.g. "wallet", "signing"), so a
+	// relying party can tell which key signed in. Every sign-in token
+	// carries it; the token dauth mints for itself, which nothing signed,
+	// does not.
+	VM string `json:"vm,omitempty"`
 }
 
 // Request is what a token is issued for.
@@ -38,6 +45,10 @@ type Request struct {
 	Scopes []string
 	// JKT is the thumbprint of the DPoP key the token is bound to.
 	JKT string
+	// VM is the fragment of the verification method that signed in, without
+	// '#'. Issue requires it; IssueFor, for the service's own tokens, does
+	// not.
+	VM string
 }
 
 // Issuer mints signed identity tokens for verified DIDs.
@@ -90,13 +101,17 @@ func NewIssuer(cfg Config) *Issuer {
 // A non-empty req.Audience overrides the configured default; the caller is
 // responsible for having validated it, and req.Scopes, against what it allows.
 // Issue trusts what it is given, except that a token always has a scope and a
-// key.
+// key, and a sign-in token always names the verification method that signed.
 func (i *Issuer) Issue(req Request) (string, time.Time, error) {
+	if req.VM == "" {
+		return "", time.Time{}, errors.New("a sign-in token needs the verification method that signed in")
+	}
 	return i.IssueFor(req, i.TTLFor(req.Scopes))
 }
 
 // IssueFor is Issue with an explicit lifetime, for the service's own
-// short-lived tokens.
+// short-lived tokens. It does not require req.VM: the service's own token is
+// minted, not signed in for.
 func (i *Issuer) IssueFor(req Request, ttl time.Duration) (string, time.Time, error) {
 	if len(req.Scopes) == 0 {
 		return "", time.Time{}, errors.New("an identity token needs a scope")
@@ -124,6 +139,7 @@ func (i *Issuer) IssueFor(req Request, ttl time.Duration) (string, time.Time, er
 		},
 		Scope: identity.FormatScope(req.Scopes),
 		Cnf:   &identity.Confirmation{JKT: req.JKT},
+		VM:    req.VM,
 	}
 
 	signed, err := i.keys.Sign(claims)

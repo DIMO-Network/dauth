@@ -6,6 +6,20 @@ metadata:
   labels:
 {{ include "dauth.labels" . | indent 4 }}
 data:
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.postgres.enabled) }}
+{{- fail "replicaCount > 1 needs postgres.enabled: the in-memory challenge store is per pod" }}
+{{- end }}
+{{- /* An environment that sets requireExchangeConfig (prod) must name its own
+       org host and dauth DID: a missing value or a REPLACE_WITH placeholder
+       stops rendering rather than deploying with another environment's. */}}
+{{- if .Values.requireExchangeConfig }}
+{{- range $key := list "ORG_HOST_URL" "DAUTH_DID" }}
+{{- $val := toString (default "" (index $.Values.env $key)) }}
+{{- if or (eq $val "") (contains "REPLACE_WITH" $val) }}
+{{- fail (printf "env.%s must be set for this environment (requireExchangeConfig is true), got %q" $key $val) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- range $key, $val := .Values.env }}
   {{ $key }} : {{ $val | quote }}
 {{- end }}

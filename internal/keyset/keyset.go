@@ -68,6 +68,15 @@ func (k *KeySet) Sign(claims jwt.Claims) (string, error) {
 // ActiveKID returns the id of the key currently signing tokens.
 func (k *KeySet) ActiveKID() string { return k.all[0].kid }
 
+// KIDs returns the id (RFC 7638 thumbprint) of every key, active first.
+func (k *KeySet) KIDs() []string {
+	out := make([]string, len(k.all))
+	for i, key := range k.all {
+		out[i] = key.kid
+	}
+	return out
+}
+
 func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {

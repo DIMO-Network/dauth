@@ -1,11 +1,53 @@
 name: Helm Lint
 on: pull_request
 
+permissions:
+  contents: read
+
 jobs:
   helm-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - name: Lint dauth chart
         run: helm lint charts/dauth
+      # helm lint does not enforce the chart's `fail` guards; rendering does.
+      - name: Render with dev values
+        run: helm template charts/dauth > /dev/null
+      # helm lint treats a template `fail` (and `required`) as informational, so
+      # the prod checks also render with helm template. The --set values are CI
+      # placeholders that satisfy requireExchangeConfig and image.requireTag;
+      # they are not prod's real values.
+      - name: Lint and render with prod values
+        run: |
+          prod_set="--set env.ORG_HOST_URL=https://org-host.invalid --set env.DAUTH_DID=did:dimo:ci-placeholder --set image.tag=ci-placeholder"
+          helm lint charts/dauth -f charts/dauth/values-prod.yaml $prod_set
+          helm template charts/dauth -f charts/dauth/values-prod.yaml $prod_set > /dev/null
+      # The tag is set here so that only the exchange config is missing.
+      - name: Prod values without exchange config must not render
+        run: |
+          if helm template charts/dauth -f charts/dauth/values-prod.yaml --set image.tag=ci-placeholder > /dev/null 2> render.err; then
+            echo "values-prod.yaml rendered without ORG_HOST_URL and DAUTH_DID; requireExchangeConfig is not enforced" >&2
+            exit 1
+          fi
+          # Only the requireExchangeConfig guard may stop it; any other render
+          # error is a real failure.
+          if ! grep -q "requireExchangeConfig is true" render.err; then
+            echo "values-prod.yaml failed to render for another reason:" >&2
+            cat render.err >&2
+            exit 1
+          fi
+      # The exchange config is set here so that only the image tag is missing.
+      - name: Prod values without an image tag must not render
+        run: |
+          prod_set="--set env.ORG_HOST_URL=https://org-host.invalid --set env.DAUTH_DID=did:dimo:ci-placeholder"
+          if helm template charts/dauth -f charts/dauth/values-prod.yaml $prod_set > /dev/null 2> render.err; then
+            echo "values-prod.yaml rendered without image.tag; image.requireTag is not enforced" >&2
+            exit 1
+          fi
+          if ! grep -q "image.tag must be set" render.err; then
+            echo "values-prod.yaml failed to render for another reason:" >&2
+            cat render.err >&2
+            exit 1
+          fi

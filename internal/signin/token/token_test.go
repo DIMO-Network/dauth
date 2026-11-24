@@ -44,7 +44,7 @@ func TestIssueRoundTrip(t *testing.T) {
 	})
 
 	const did = "did:dimo:member"
-	signed, exp, err := iss.Issue(Request{DID: did, Scopes: []string{"read"}, JKT: testJKT})
+	signed, exp, err := iss.Issue(Request{DID: did, Scopes: []string{"read"}, JKT: testJKT, VM: "wallet"})
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(10*time.Minute), exp)
 
@@ -66,6 +66,7 @@ func TestIssueRoundTrip(t *testing.T) {
 	assert.Equal(t, "read", claims.Scope)
 	require.NotNil(t, claims.Cnf)
 	assert.Equal(t, testJKT, claims.Cnf.JKT)
+	assert.Equal(t, "wallet", claims.VM)
 	assert.Equal(t, now.Unix(), claims.IssuedAt.Unix())
 	assert.Equal(t, now.Add(10*time.Minute).Unix(), claims.ExpiresAt.Unix())
 }
@@ -76,7 +77,7 @@ func TestIssue_RejectedAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	iss := NewIssuer(Config{Keys: ks, Issuer: "iss", Audience: []string{"a"}, TTL: time.Minute, Now: func() time.Time { return now }})
-	signed, _, err := iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}, JKT: testJKT})
+	signed, _, err := iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}, JKT: testJKT, VM: "signing"})
 	require.NoError(t, err)
 
 	pub := firstJWKSPublicKey(t, jwksRaw)
@@ -103,7 +104,7 @@ func TestIssue_AudienceOverride(t *testing.T) {
 	pub := firstJWKSPublicKey(t, jwksRaw)
 
 	// Override wins.
-	signed, _, err := iss.Issue(Request{DID: did, Audience: []string{"step-ca"}, Scopes: []string{"read"}, JKT: testJKT})
+	signed, _, err := iss.Issue(Request{DID: did, Audience: []string{"step-ca"}, Scopes: []string{"read"}, JKT: testJKT, VM: "signing"})
 	require.NoError(t, err)
 	var claims Claims
 	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithTimeFunc(func() time.Time { return now.Add(time.Minute) })).
@@ -112,7 +113,7 @@ func TestIssue_AudienceOverride(t *testing.T) {
 	assert.Equal(t, jwt.ClaimStrings{"step-ca"}, claims.Audience)
 
 	// Empty override falls back to the configured default.
-	signed, _, err = iss.Issue(Request{DID: did, Scopes: []string{"read"}, JKT: testJKT})
+	signed, _, err = iss.Issue(Request{DID: did, Scopes: []string{"read"}, JKT: testJKT, VM: "signing"})
 	require.NoError(t, err)
 	claims = Claims{}
 	_, err = jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithTimeFunc(func() time.Time { return now.Add(time.Minute) })).
@@ -132,8 +133,29 @@ func firstJWKSPublicKey(t *testing.T, jwksRaw []byte) *rsa.PublicKey {
 // who may present it.
 func TestIssueNeedsScopeAndKey(t *testing.T) {
 	iss := NewIssuer(Config{Keys: newTestKeySet(t), Issuer: "iss", Audience: []string{"a"}, TTL: time.Minute})
-	_, _, err := iss.Issue(Request{DID: "did:dimo:member", JKT: testJKT})
+	_, _, err := iss.Issue(Request{DID: "did:dimo:member", JKT: testJKT, VM: "signing"})
 	assert.Error(t, err)
-	_, _, err = iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}})
+	_, _, err = iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}, VM: "signing"})
 	assert.Error(t, err)
+}
+
+// A sign-in token always names the verification method that signed in. The
+// service's own token, minted with IssueFor, has none to name and carries no
+// vm claim.
+func TestIssueNamesVerificationMethod(t *testing.T) {
+	ks := newTestKeySet(t)
+	jwksRaw, err := ks.JWKS()
+	require.NoError(t, err)
+	iss := NewIssuer(Config{Keys: ks, Issuer: "iss", Audience: []string{"a"}, TTL: time.Minute})
+
+	_, _, err = iss.Issue(Request{DID: "did:dimo:member", Scopes: []string{"read"}, JKT: testJKT})
+	assert.Error(t, err, "a sign-in token without its verification method")
+
+	signed, _, err := iss.IssueFor(Request{DID: "did:dimo:dauth", Scopes: []string{"read"}, JKT: testJKT}, time.Minute)
+	require.NoError(t, err)
+	claims := jwt.MapClaims{}
+	pub := firstJWKSPublicKey(t, jwksRaw)
+	_, err = jwt.NewParser().ParseWithClaims(signed, claims, func(*jwt.Token) (any, error) { return pub, nil })
+	require.NoError(t, err)
+	assert.NotContains(t, claims, "vm")
 }
