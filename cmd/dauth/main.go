@@ -4,7 +4,7 @@
 //   - /signin    a DID signs a challenge with a key its DID document lists
 //     and gets a short-lived RS256 identity token whose sub is
 //     the DID. The org host accepts these as member identity.
-//   - /exchange  swaps an identity token plus a DPoP proof for an access
+//   - /exchange  (optional: off when ORG_HOST_URL is unset) swaps an identity token plus a DPoP proof for an access
 //     token scoped to one vehicle, after the org host has evaluated
 //     the named delegation for that caller.
 //
@@ -90,13 +90,6 @@ func run(log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	exchangeKeys, err := keyset.Load(exchangeCfg.SigningKeys)
-	if err != nil {
-		return fmt.Errorf("failed to load exchange signing keys: %w", err)
-	}
-	if err := checkKeysDistinct(signinKeys, exchangeKeys); err != nil {
-		return err
-	}
 	issuer := token.NewIssuer(token.Config{Keys: signinKeys, Issuer: cfg.Issuer, Audience: cfg.Audience, TTL: cfg.TokenTTL, ApproveTTL: cfg.ApproveTTL})
 	signinHandler, err := buildSignin(ctx, cfg, relyingParties(cfg, exchangeCfg), signinKeys, issuer, log)
 	if err != nil {
@@ -104,29 +97,13 @@ func run(log zerolog.Logger) error {
 	}
 
 	// --- Exchange (/exchange) surface ----------------------------------------
-	// The exchange validates the inbound identity token against the /signin
-	// keyset in-process, and calls the org host as its own DID with a token
-	// from the same issuer.
-	signinJWKS, err := signinKeys.JWKS()
+	exchangeSurface, err := setupExchange(cfg, exchangeCfg, signinKeys, issuer, log)
 	if err != nil {
 		return err
-	}
-	identity, err := exchange.NewIdentityVerifier(signinJWKS, cfg.Issuer, cfg.PublicBaseURL+"/exchange")
-	if err != nil {
-		return err
-	}
-	exchangeSurface, err := buildExchange(cfg, exchangeCfg, exchangeKeys, issuer, identity, log)
-	if err != nil {
-		return fmt.Errorf("building exchange surface: %w", err)
 	}
 
 	// --- Compose one public handler ------------------------------------------
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", healthCheck)
-	mux.Handle("/signin/", http.StripPrefix("/signin", signinHandler))
-	mux.Handle("POST /exchange", exchangeSurface.Exchange)
-	mux.Handle("/exchange/", http.StripPrefix("/exchange", exchangeSurface.WellKnown))
-	publicHandler := httpmw.Recover(log)(mux)
+	publicHandler := httpmw.Recover(log)(newPublicHandler(signinHandler, exchangeSurface))
 
 	publicSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -139,15 +116,63 @@ func run(log zerolog.Logger) error {
 	group.Go(func() error { return serveHTTP(gctx, publicSrv, log) })
 	group.Go(func() error { return serveHTTP(gctx, opsSrv, log) })
 
-	log.Info().
+	startup := log.Info().
 		Str("http", cfg.HTTPAddr).Str("ops", cfg.OpsAddr).
 		Str("public_base_url", cfg.PublicBaseURL).Str("directory", cfg.DirectoryURL).
 		Str("signin_issuer", cfg.Issuer).Str("signin_active_kid", signinKeys.ActiveKID()).
 		Strs("signin_cors_origins", cfg.CORSOrigins).Int("signin_rate_limit_per_second", cfg.RateLimitPerSecond).
 		Strs("signin_trusted_proxies", prefixStrings(cfg.TrustedProxies)).
-		Str("exchange_issuer", exchangeCfg.Issuer).Str("org_host", exchangeCfg.OrgHostURL).Str("dauth_did", exchangeCfg.DauthDID).
-		Msg("dauth started")
+		Bool("exchange_enabled", exchangeCfg.Enabled())
+	if exchangeCfg.Enabled() {
+		startup = startup.Str("exchange_issuer", exchangeCfg.Issuer).Str("org_host", exchangeCfg.OrgHostURL).Str("dauth_did", exchangeCfg.DauthDID)
+	}
+	startup.Msg("dauth started")
 	return group.Wait()
+}
+
+// setupExchange builds the /exchange surface, or returns nil when it is
+// disabled (ORG_HOST_URL unset). The exchange validates the inbound identity
+// token against the /signin keyset in-process, and calls the org host as its
+// own DID with a token from the same issuer. Its signing keys must differ from
+// the /signin keys.
+func setupExchange(cfg config.Config, ecfg exchange.Config, signinKeys *keyset.KeySet, issuer *token.Issuer, log zerolog.Logger) (*exchange.Surface, error) {
+	if !ecfg.Enabled() {
+		log.Info().Msg("exchange disabled: ORG_HOST_URL not set")
+		return nil, nil
+	}
+	exchangeKeys, err := keyset.Load(ecfg.SigningKeys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load exchange signing keys: %w", err)
+	}
+	if err := checkKeysDistinct(signinKeys, exchangeKeys); err != nil {
+		return nil, err
+	}
+	signinJWKS, err := signinKeys.JWKS()
+	if err != nil {
+		return nil, err
+	}
+	identity, err := exchange.NewIdentityVerifier(signinJWKS, cfg.Issuer, cfg.PublicBaseURL+"/exchange")
+	if err != nil {
+		return nil, err
+	}
+	surface, err := buildExchange(cfg, ecfg, exchangeKeys, issuer, identity, log)
+	if err != nil {
+		return nil, fmt.Errorf("building exchange surface: %w", err)
+	}
+	return &surface, nil
+}
+
+// newPublicHandler mounts both surfaces on one mux. A nil exchange (disabled)
+// leaves /exchange and everything under it unrouted, so they answer 404.
+func newPublicHandler(signin http.Handler, ex *exchange.Surface) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", healthCheck)
+	mux.Handle("/signin/", http.StripPrefix("/signin", signin))
+	if ex != nil {
+		mux.Handle("POST /exchange", ex.Exchange)
+		mux.Handle("/exchange/", http.StripPrefix("/exchange", ex.WellKnown))
+	}
+	return mux
 }
 
 // buildSignin constructs the sign-in surface handler from an already-loaded
@@ -281,11 +306,15 @@ func newAssertionVerifier(keys exchange.KeyVerifier, audience string) *exchange.
 }
 
 // relyingParties is the audiences a sign-in may ask for: those configured,
-// plus the two dauth itself knows need identity tokens of their own, the
-// exchange and the org host. Each checks aud, so a token is only ever good
+// plus, when the exchange is enabled, the two dauth itself knows need identity
+// tokens of their own, the exchange and the org host. Each checks aud, so a token is only ever good
 // where its holder asked for it to be.
 func relyingParties(cfg config.Config, ecfg exchange.Config) []string {
-	return append(slices.Clone(cfg.AllowedAudiences), cfg.PublicBaseURL+"/exchange", ecfg.OrgHostURL)
+	aud := slices.Clone(cfg.AllowedAudiences)
+	if ecfg.Enabled() {
+		aud = append(aud, cfg.PublicBaseURL+"/exchange", ecfg.OrgHostURL)
+	}
+	return aud
 }
 
 func prefixStrings(prefixes []netip.Prefix) []string {

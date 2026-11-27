@@ -38,6 +38,18 @@ jobs:
             cat render.err >&2
             exit 1
           fi
+      # With requireExchangeConfig off, prod values render with no exchange
+      # config at all: dauth then runs with /exchange disabled. The flag stays
+      # true in values-prod.yaml until that is decided; this only proves the
+      # chart handles the absent values. The ExternalSecret must then not ask
+      # for the exchange signing key.
+      - name: Prod values render without exchange config when not required
+        run: |
+          helm template charts/dauth -f charts/dauth/values-prod.yaml --set requireExchangeConfig=false --set image.tag=ci-placeholder > rendered.yaml
+          if grep -q "ORG_HOST_URL\|DAUTH_DID\|EXCHANGE_SIGNING_KEY_1" rendered.yaml; then
+            echo "exchange config rendered although it is unset" >&2
+            exit 1
+          fi
       # The exchange config is set here so that only the image tag is missing.
       - name: Prod values without an image tag must not render
         run: |

@@ -344,15 +344,42 @@ arithmetic.
 | `SIGNIN_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active; must differ from the `/exchange` keys |
 | `CHALLENGE_TTL`, `TOKEN_TTL`, `APPROVE_TOKEN_TTL` | | `5m`, `15m`, the shorter of `5m` and `TOKEN_TTL` | Lifetimes, each above 0; `APPROVE_TOKEN_TTL` is for tokens carrying `approve` and, when set, may not exceed `TOKEN_TTL` |
 | `DATABASE_URL` | | | Postgres challenge store; unset = in-memory, single replica |
-| `EXCHANGE_ISSUER` | yes | | `iss` of access tokens |
+| `EXCHANGE_ISSUER` | with `ORG_HOST_URL` | | `iss` of access tokens |
 | `EXCHANGE_AUDIENCE` | | `dq` | Default `aud` of access tokens |
-| `EXCHANGE_SIGNING_KEY_1…N` | yes | | PEM RSA keys, first active |
-| `ORG_HOST_URL` | yes | | Org host that answers `/authorize` |
+| `EXCHANGE_SIGNING_KEY_1…N` | with `ORG_HOST_URL` | | PEM RSA keys, first active |
+| `ORG_HOST_URL` | | | Org host that answers `/authorize`. Unset disables `/exchange` (see below) |
 | `ORG_HOST_TIMEOUT` | | `10s` | Per-call timeout |
-| `DAUTH_DID` | yes | | DID dauth presents to the host |
+| `DAUTH_DID` | with `ORG_HOST_URL` | | DID dauth presents to the host |
 | `EXCHANGE_LIVE_TTL`, `EXCHANGE_HISTORICAL_TTL` | | `15m`, `2h` | Access token lifetimes |
 | `HTTP_ADDRESS`, `OPS_ADDRESS` | | `:8080`, `:8081` | Listeners |
 | `ENABLE_PPROF`, `LOG_LEVEL` | | | Ops |
+
+## Running without `/exchange`
+
+`/exchange` is optional. dauth disables it when `ORG_HOST_URL` is unset, and
+only then; login signing needs `/signin` alone. Every other combination is
+decided as before:
+
+| `ORG_HOST_URL` | Other exchange variables | Result |
+|---|---|---|
+| unset | anything | `/exchange` disabled; the other `EXCHANGE_*`, `DAUTH_DID` and `ORG_HOST_TIMEOUT` variables are ignored |
+| set | `EXCHANGE_ISSUER`, `DAUTH_DID` (a `did:`), `EXCHANGE_SIGNING_KEY_1` all valid | `/exchange` enabled |
+| set | `EXCHANGE_ISSUER`, `DAUTH_DID` or a signing key missing or malformed | startup fails |
+
+While disabled:
+
+- `POST /exchange` and `GET /exchange/keys`, `/exchange/.well-known/jwks.json`
+  and `/exchange/.well-known/openid-configuration` answer `404`.
+- `/signin/*` and `GET /` are unchanged. The `/signin` audiences no longer
+  include `<PUBLIC_BASE_URL>/exchange` or the org host, since neither is
+  running.
+- No exchange keys are loaded, so the `/signin` and `/exchange` keys-differ
+  check does not run either.
+- `/ping`, `/ready` and `/metrics` on the ops port are unchanged: readiness
+  never depended on the org host or the exchange. `ENABLE_PPROF` still applies.
+- Startup logs `exchange disabled: ORG_HOST_URL not set`, and the `dauth
+  started` line reports `exchange_enabled=false` instead of the exchange
+  fields.
 
 ## Signing keys
 
@@ -410,6 +437,12 @@ and access.
 `env.ORG_HOST_URL` and `env.DAUTH_DID` are set to real values (no
 `REPLACE_WITH` placeholder). It also sets both to `null`, so prod never
 inherits dev's values from `values.yaml` through Helm's merge.
+
+Setting `requireExchangeConfig: false` with no `env.ORG_HOST_URL` renders a
+release with `/exchange` disabled; the ExternalSecret then omits
+`EXCHANGE_SIGNING_KEY_1`, so that secret need not exist. CI renders prod values
+this way to keep it working. Prod stays at `true` until running without
+`/exchange` is decided.
 
 Prod's image is promoted by PR. `buildpushdev` writes each main push's SHA to
 `values.yaml`'s `image.tag` only, for dev. `values-prod.yaml` sets an empty
