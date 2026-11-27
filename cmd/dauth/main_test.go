@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/DIMO-Network/dauth/internal/exchange"
 	"github.com/DIMO-Network/dauth/internal/keyset"
+	"github.com/DIMO-Network/dauth/internal/signin/config"
 	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -131,4 +134,75 @@ func TestDPoPVerifierReplayCapFitsThePod(t *testing.T) {
 	assert.Less(t, dpopReplayEntries, dpop.DefaultMaxReplayEntries)
 	// Two surfaces at roughly 160 bytes an entry stay under 64 MiB together.
 	assert.LessOrEqual(t, 2*dpopReplayEntries*160, 64<<20)
+}
+
+// With /exchange disabled (ORG_HOST_URL unset) the public handler still serves
+// /signin and the health check, and every /exchange route, the JWKS and
+// discovery included, answers 404 rather than reaching a nil handler.
+func TestPublicHandlerExchangeDisabled(t *testing.T) {
+	signin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("signin " + r.URL.Path))
+	})
+	h := newPublicHandler(signin, nil)
+
+	for _, tc := range []struct {
+		method, path string
+		code         int
+		body         string
+	}{
+		{"GET", "/", http.StatusOK, ""},
+		{"GET", "/signin/keys", http.StatusOK, "signin /keys"},
+		{"POST", "/signin/challenge", http.StatusOK, "signin /challenge"},
+		{"POST", "/exchange", http.StatusNotFound, ""},
+		{"GET", "/exchange", http.StatusNotFound, ""},
+		{"GET", "/exchange/keys", http.StatusNotFound, ""},
+		{"GET", "/exchange/.well-known/jwks.json", http.StatusNotFound, ""},
+		{"GET", "/exchange/.well-known/openid-configuration", http.StatusNotFound, ""},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+			assert.Equal(t, tc.code, rec.Code)
+			if tc.body != "" {
+				assert.Equal(t, tc.body, rec.Body.String())
+			}
+		})
+	}
+}
+
+// With /exchange enabled its routes are mounted, so the same paths reach the
+// surface.
+func TestPublicHandlerExchangeEnabled(t *testing.T) {
+	tag := func(s string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(s + r.URL.Path)) })
+	}
+	h := newPublicHandler(tag("signin"), &exchange.Surface{Exchange: tag("exchange"), WellKnown: tag("wk")})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/exchange", nil))
+	assert.Equal(t, "exchange/exchange", rec.Body.String())
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/exchange/keys", nil))
+	assert.Equal(t, "wk/keys", rec.Body.String())
+}
+
+// Disabled exchange skips its keys and org host entirely: no signing keys are
+// needed, startup says why, and the surface is nil.
+func TestSetupExchangeDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+	surface, err := setupExchange(config.Config{}, exchange.Config{}, testKeySet(t, newKeyPEM(t)), nil, log)
+	require.NoError(t, err)
+	assert.Nil(t, surface)
+	assert.Contains(t, buf.String(), "exchange disabled: ORG_HOST_URL not set")
+}
+
+// The sign-in audiences gain the exchange and the org host only when the
+// exchange is enabled.
+func TestRelyingParties(t *testing.T) {
+	cfg := config.Config{PublicBaseURL: "https://d.test", AllowedAudiences: []string{"https://accounts.test"}}
+	assert.Equal(t, []string{"https://accounts.test"}, relyingParties(cfg, exchange.Config{}))
+	assert.Equal(t,
+		[]string{"https://accounts.test", "https://d.test/exchange", "https://org.test"},
+		relyingParties(cfg, exchange.Config{OrgHostURL: "https://org.test"}))
 }

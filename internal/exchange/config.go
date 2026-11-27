@@ -24,7 +24,7 @@ type Config struct {
 	SigningKeys []string
 
 	// OrgHostURL is the org host whose /authorize decides what a caller may
-	// do (plan §1 decision A). Required.
+	// do (plan §1 decision A). Unset disables /exchange; see Enabled.
 	OrgHostURL string
 	// OrgHostTimeout bounds one /authorize call. ORG_HOST_TIMEOUT, default 10s.
 	OrgHostTimeout time.Duration
@@ -41,7 +41,16 @@ type Config struct {
 	EnablePprof bool
 }
 
-// Load reads Config from the environment.
+// Enabled reports whether the /exchange surface runs. It does exactly when an
+// org host is configured: without one there is nobody to ask what a caller may
+// do, so dauth serves /signin alone.
+func (c Config) Enabled() bool { return c.OrgHostURL != "" }
+
+// Load reads Config from the environment. ORG_HOST_URL unset means /exchange is
+// disabled: Load returns a Config with Enabled() false (only EnablePprof set,
+// as it belongs to the ops server) and no error, and ignores every other
+// exchange variable. With ORG_HOST_URL set, EXCHANGE_ISSUER, DAUTH_DID and a
+// signing key are all required, and a missing or malformed one is an error.
 func Load() (Config, error) {
 	c := Config{
 		Issuer:      os.Getenv("EXCHANGE_ISSUER"),
@@ -49,6 +58,9 @@ func Load() (Config, error) {
 		OrgHostURL:  os.Getenv("ORG_HOST_URL"),
 		DauthDID:    os.Getenv("DAUTH_DID"),
 		EnablePprof: envx.String("ENABLE_PPROF", "false") == "true",
+	}
+	if c.OrgHostURL == "" {
+		return Config{EnablePprof: c.EnablePprof}, nil
 	}
 	if c.Issuer == "" {
 		return c, errors.New("EXCHANGE_ISSUER is required (e.g. https://dauth.dimo.zone/exchange)")
@@ -59,9 +71,6 @@ func Load() (Config, error) {
 	}
 	c.Issuer = strings.TrimRight(c.Issuer, "/")
 
-	if c.OrgHostURL == "" {
-		return c, errors.New("ORG_HOST_URL is required (the org host that answers /authorize)")
-	}
 	if u, err := url.Parse(c.OrgHostURL); err != nil || u.Scheme == "" || u.Host == "" {
 		return c, fmt.Errorf("ORG_HOST_URL must be an absolute URL, got %q", c.OrgHostURL)
 	}
